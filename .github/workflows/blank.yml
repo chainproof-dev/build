@@ -126,6 +126,7 @@ jobs:
       V8_DIR: ${{ github.workspace }}/.ci/v8-checkout/v8
       OUT_DIR: ${{ github.workspace }}/.ci/v8-checkout/v8/out/security-build
       PACKAGE_ROOT: ${{ github.workspace }}/.ci/v8-package
+      GN_BIN: ${{ github.workspace }}/.ci/v8-checkout/v8/buildtools/linux64/gn
 
     steps:
       - name: Show resources and reclaim disk
@@ -178,18 +179,15 @@ jobs:
           echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
           export PATH="$DEPOT_TOOLS:$PATH"
 
-          # A fresh depot_tools clone does not yet contain its CIPD-managed
-          # Python/tool bootstrap. Initialize the current checkout explicitly
-          # before invoking gclient, fetch, gn, or autoninja.
+          # Bootstrap depot_tools' CIPD-managed Python. The real GN binary is
+          # a source-checkout dependency and does not exist until gclient hooks run.
           "$DEPOT_TOOLS/ensure_bootstrap"
 
           test -s "$DEPOT_TOOLS/python3_bin_reldir.txt"
           command -v fetch
           command -v gclient
-          command -v gn
           command -v autoninja
-          gclient --version
-          gn --version
+          gclient help >/dev/null
 
       - name: Fetch V8 and synchronize exact dependencies
         shell: bash
@@ -216,6 +214,11 @@ jobs:
 
           actual_revision="$(git rev-parse HEAD)"
           [[ "$actual_revision" == "$V8_REVISION" ]]
+
+          # Ensure source hooks have installed GN, Clang, Ninja and other tools.
+          gclient runhooks
+          test -x "$GN_BIN"
+          "$GN_BIN" --version
           df -h
 
       - name: Install V8 Linux dependencies and x64 sysroot
@@ -375,8 +378,8 @@ jobs:
           echo "===== $BUILD_ID args.gn ====="
           cat "$OUT_DIR/args.gn"
 
-          gn gen "$OUT_DIR" --fail-on-unused-args
-          gn args "$OUT_DIR" --list --short > "$OUT_DIR/effective-args.txt"
+          "$GN_BIN" gen "$OUT_DIR" --fail-on-unused-args
+          "$GN_BIN" args "$OUT_DIR" --list --short > "$OUT_DIR/effective-args.txt"
 
       - name: Build d8 with all available CPUs
         shell: bash
@@ -440,7 +443,7 @@ jobs:
 
           cp "$OUT_DIR/args.gn" "$stage/args.gn"
           cp "$OUT_DIR/effective-args.txt" "$stage/effective-args.txt"
-          gn desc "$OUT_DIR" //:d8 runtime_deps > "$stage/d8-runtime-deps.txt" || true
+          "$GN_BIN" desc "$OUT_DIR" //:d8 runtime_deps > "$stage/d8-runtime-deps.txt" || true
 
           {
             echo "build_id=$BUILD_ID"
@@ -540,6 +543,7 @@ jobs:
       CHROMIUM_DIR: ${{ github.workspace }}/.ci/chromium-checkout/src
       OUT_DIR: ${{ github.workspace }}/.ci/chromium-checkout/src/out/security-chrome
       PACKAGE_ROOT: ${{ github.workspace }}/.ci/chromium-package
+      GN_BIN: ${{ github.workspace }}/.ci/chromium-checkout/src/buildtools/linux64/gn
 
     steps:
       - name: Show resources and reclaim disk aggressively
@@ -593,17 +597,15 @@ jobs:
           echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
           export PATH="$DEPOT_TOOLS:$PATH"
 
-          # Bootstrap the CIPD-managed Python and helper tools in this exact
-          # depot_tools checkout before any wrapper is executed.
+          # Bootstrap depot_tools' CIPD-managed Python. Chromium's real GN
+          # binary is downloaded later by the source checkout hooks.
           "$DEPOT_TOOLS/ensure_bootstrap"
 
           test -s "$DEPOT_TOOLS/python3_bin_reldir.txt"
           command -v fetch
           command -v gclient
-          command -v gn
           command -v autoninja
-          gclient --version
-          gn --version
+          gclient help >/dev/null
 
       - name: Fetch Chromium and synchronize exact dependencies
         shell: bash
@@ -630,6 +632,11 @@ jobs:
 
           actual_revision="$(git rev-parse HEAD)"
           [[ "$actual_revision" == "$CHROMIUM_REVISION" ]]
+
+          # Ensure Chromium hooks have installed GN, Clang, Ninja and runtime data.
+          gclient runhooks
+          test -x "$GN_BIN"
+          "$GN_BIN" --version
           git -C v8 rev-parse HEAD > "$RUNNER_TEMP/chromium-v8-revision.txt"
           df -h
 
@@ -666,8 +673,8 @@ jobs:
           sed -i 's/^          //' "$OUT_DIR/args.gn"
 
           cat "$OUT_DIR/args.gn"
-          gn gen "$OUT_DIR" --fail-on-unused-args
-          gn args "$OUT_DIR" --list --short > "$OUT_DIR/effective-args.txt"
+          "$GN_BIN" gen "$OUT_DIR" --fail-on-unused-args
+          "$GN_BIN" args "$OUT_DIR" --list --short > "$OUT_DIR/effective-args.txt"
 
       - name: Build optimized Chromium with all available CPUs
         shell: bash
@@ -723,7 +730,7 @@ jobs:
           archive="$RUNNER_TEMP/chromium-x64-optimized-$CHROMIUM_SHORT_REVISION-linux-x64.tar.gz"
           mkdir -p "$stage"
 
-          gn desc "$OUT_DIR" //chrome runtime_deps > "$RUNNER_TEMP/chrome-runtime-deps.txt"
+          "$GN_BIN" desc "$OUT_DIR" //chrome runtime_deps > "$RUNNER_TEMP/chrome-runtime-deps.txt"
 
           python3 - <<'PY'
           import os
