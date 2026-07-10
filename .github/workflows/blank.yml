@@ -11,144 +11,348 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     strategy:
       max-parallel: 1
       fail-fast: false
       matrix:
         include:
           - name: release
+            cc: gcc
+            cxx: g++
             configure_flags: >-
               --disable-stripping
               --enable-debug=2
-              --extra-cflags="-O2 -g -fno-omit-frame-pointer"
-              --extra-ldflags=""
-            make_targets: "ffmpeg ffprobe"
+              --extra-cflags=-O2 -g -fno-omit-frame-pointer
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: ""
 
           - name: debug
+            cc: gcc
+            cxx: g++
             configure_flags: >-
               --disable-stripping
               --enable-debug=3
               --disable-optimizations
-              --extra-cflags="-O0 -g3 -fno-omit-frame-pointer"
-              --extra-ldflags=""
-            make_targets: "ffmpeg ffprobe"
+              --extra-cflags=-O0 -g3 -fno-omit-frame-pointer
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: ""
 
           - name: asan-ubsan
+            cc: clang
+            cxx: clang++
             configure_flags: >-
               --disable-stripping
               --enable-debug=3
               --disable-optimizations
               --toolchain=clang-asan
-              --extra-cflags="-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
-              --extra-ldflags="-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            make_targets: "ffmpeg ffprobe tests/videogen"
+              --extra-cflags=-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
+              --extra-ldflags=-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: "tests/videogen tools/target_dem_fuzzer"
 
           - name: ubsan-strict
+            cc: clang
+            cxx: clang++
             configure_flags: >-
               --disable-stripping
               --enable-debug=3
               --disable-optimizations
               --cc=clang
               --cxx=clang++
-              --extra-cflags="-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer -fno-sanitize-recover=all"
-              --extra-ldflags="-fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer"
-            make_targets: "ffmpeg ffprobe tests/videogen"
+              --extra-cflags=-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer -fno-sanitize-recover=all
+              --extra-ldflags=-fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: "tests/videogen"
 
           - name: shared-dev
+            cc: gcc
+            cxx: g++
             configure_flags: >-
               --disable-stripping
               --enable-shared
               --disable-static
               --enable-debug=2
-              --extra-cflags="-O1 -g3 -fno-omit-frame-pointer"
-              --extra-ldflags=""
-            make_targets: "ffmpeg ffprobe"
+              --extra-cflags=-O1 -g3 -fno-omit-frame-pointer
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: ""
 
           - name: fate-tools-asan
+            cc: clang
+            cxx: clang++
             configure_flags: >-
               --disable-stripping
               --enable-debug=3
               --disable-optimizations
               --toolchain=clang-asan
-              --extra-cflags="-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
-              --extra-ldflags="-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            make_targets: "tests/videogen tools/target_dem_fuzzer ffmpeg ffprobe"
+              --extra-cflags=-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
+              --extra-ldflags=-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: "tests/videogen tools/target_dem_fuzzer"
 
     steps:
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             git build-essential clang lld pkg-config yasm nasm \
-            zlib1g-dev libssl-dev libxml2-dev zip curl python3
+            zlib1g-dev libssl-dev libxml2-dev zip curl python3 ca-certificates \
+            file xz-utils
 
       - name: Clone FFmpeg
+        shell: bash
         run: |
+          set -euxo pipefail
           git clone https://github.com/FFmpeg/FFmpeg.git ffmpeg
           cd ffmpeg
           git checkout "${{ github.event.inputs.ffmpeg_ref }}"
           git rev-parse HEAD | tee ../FFMPEG_COMMIT.txt
+          git status --short
 
       - name: Configure FFmpeg
+        shell: bash
         working-directory: ffmpeg
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
         run: |
+          set -euxo pipefail
+
+          mkdir -p "../out/${{ matrix.name }}"
+
           ./configure \
             --prefix="$PWD/../out/${{ matrix.name }}" \
             ${{ matrix.configure_flags }}
 
-      - name: Build FFmpeg
+      - name: Build essential targets
+        shell: bash
         working-directory: ffmpeg
         run: |
-          make -j"$(nproc)" ${{ matrix.make_targets }}
-          make install || true
+          set -euxo pipefail
 
-      - name: Collect build files
+          echo "[+] Building essential targets: ${{ matrix.essential_targets }}"
+          for target in ${{ matrix.essential_targets }}; do
+            echo "[+] make $target"
+            make -j"$(nproc)" "$target"
+          done
+
+      - name: Build optional targets
+        shell: bash
+        working-directory: ffmpeg
         run: |
-          mkdir -p "package/${{ matrix.name }}/bin"
-          mkdir -p "package/${{ matrix.name }}/lib"
-          mkdir -p "package/${{ matrix.name }}/include"
-          mkdir -p "package/${{ matrix.name }}/build-info"
+          set -uxo pipefail
 
-          cp ffmpeg/ffmpeg "package/${{ matrix.name }}/bin/" || true
-          cp ffmpeg/ffprobe "package/${{ matrix.name }}/bin/" || true
-          cp ffmpeg/tests/videogen "package/${{ matrix.name }}/bin/" || true
-          cp ffmpeg/tools/target_dem_fuzzer "package/${{ matrix.name }}/bin/" || true
+          echo "[+] Optional targets: ${{ matrix.optional_targets }}"
 
-          cp -a "out/${{ matrix.name }}/lib/"* "package/${{ matrix.name }}/lib/" 2>/dev/null || true
-          cp -a "out/${{ matrix.name }}/include/"* "package/${{ matrix.name }}/include/" 2>/dev/null || true
+          for target in ${{ matrix.optional_targets }}; do
+            echo "[+] Attempting optional target: $target"
+            if make -j"$(nproc)" "$target"; then
+              echo "[OK] Built optional target: $target"
+            else
+              echo "[WARN] Optional target failed or unavailable: $target"
+            fi
+          done
 
-          cp ffmpeg/config.log "package/${{ matrix.name }}/build-info/config.log"
-          cp ffmpeg/config.h "package/${{ matrix.name }}/build-info/config.h"
-          cp ffmpeg/ffbuild/config.mak "package/${{ matrix.name }}/build-info/config.mak"
-          cp FFMPEG_COMMIT.txt "package/${{ matrix.name }}/build-info/FFMPEG_COMMIT.txt"
+          # Fallback manual videogen build if make target did not produce it.
+          if echo "${{ matrix.optional_targets }}" | grep -q "tests/videogen"; then
+            if [ ! -x tests/videogen ]; then
+              echo "[WARN] tests/videogen missing. Trying manual fallback compile."
 
-          cat > "package/${{ matrix.name }}/RUN_ENV.sh" <<'EOF'
+              if echo "${{ matrix.name }}" | grep -Eq "asan|ubsan"; then
+                ${{ matrix.cc }} -O0 -g3 -fno-omit-frame-pointer \
+                  -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow \
+                  -I. -I./ \
+                  -o tests/videogen \
+                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
+              else
+                ${{ matrix.cc }} -O0 -g3 -fno-omit-frame-pointer \
+                  -I. -I./ \
+                  -o tests/videogen \
+                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
+              fi
+            fi
+          fi
+
+      - name: Install FFmpeg
+        shell: bash
+        working-directory: ffmpeg
+        run: |
+          set -uxo pipefail
+
+          echo "[+] Running make install"
+          if make install; then
+            echo "[OK] make install succeeded"
+          else
+            echo "[WARN] make install failed. Packaging will continue from build tree."
+          fi
+
+      - name: Collect build files safely
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PKG="package/${{ matrix.name }}"
+          PREFIX="$PWD/out/${{ matrix.name }}"
+
+          mkdir -p "$PKG/bin" "$PKG/lib" "$PKG/include" "$PKG/build-info" "$PKG/src-snippets"
+
+          copy_if_exists() {
+            SRC="$1"
+            DST="$2"
+            if [ -e "$SRC" ]; then
+              cp -a "$SRC" "$DST"
+              echo "[copy] $SRC -> $DST"
+            else
+              echo "[skip] missing: $SRC"
+            fi
+          }
+
+          copy_dir_if_exists() {
+            SRC="$1"
+            DST="$2"
+            if [ -d "$SRC" ]; then
+              mkdir -p "$DST"
+              cp -a "$SRC/." "$DST/" || true
+              echo "[copy-dir] $SRC -> $DST"
+            else
+              echo "[skip-dir] missing: $SRC"
+            fi
+          }
+
+          # Build-tree binaries
+          copy_if_exists "ffmpeg/ffmpeg" "$PKG/bin/"
+          copy_if_exists "ffmpeg/ffprobe" "$PKG/bin/"
+          copy_if_exists "ffmpeg/ffplay" "$PKG/bin/"
+          copy_if_exists "ffmpeg/tests/videogen" "$PKG/bin/"
+          copy_if_exists "ffmpeg/tools/target_dem_fuzzer" "$PKG/bin/"
+
+          # Installed binaries
+          copy_if_exists "$PREFIX/bin/ffmpeg" "$PKG/bin/"
+          copy_if_exists "$PREFIX/bin/ffprobe" "$PKG/bin/"
+          copy_if_exists "$PREFIX/bin/ffplay" "$PKG/bin/"
+
+          # Installed libs/includes
+          copy_dir_if_exists "$PREFIX/lib" "$PKG/lib"
+          copy_dir_if_exists "$PREFIX/include" "$PKG/include"
+
+          # Build-tree static libs as fallback
+          for lib in ffmpeg/libavutil/libavutil.a ffmpeg/libavcodec/libavcodec.a ffmpeg/libavformat/libavformat.a ffmpeg/libavdevice/libavdevice.a ffmpeg/libavfilter/libavfilter.a ffmpeg/libswscale/libswscale.a ffmpeg/libswresample/libswresample.a; do
+            copy_if_exists "$lib" "$PKG/lib/"
+          done
+
+          # Config/build info paths vary by version
+          copy_if_exists "ffmpeg/config.h" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/config.log" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/ffbuild/config.log" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/ffbuild/config.mak" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/ffbuild/config.sh" "$PKG/build-info/"
+          copy_if_exists "FFMPEG_COMMIT.txt" "$PKG/build-info/"
+
+          # Useful source files for reports
+          copy_if_exists "ffmpeg/libavformat/http.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavformat/rtsp.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavformat/mov.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavformat/concatdec.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavformat/id3v2.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavformat/omadec.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavformat/matroskadec.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavutil/rc4.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavutil/blowfish.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/libavutil/aes_ctr.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/tests/videogen.c" "$PKG/src-snippets/"
+          copy_if_exists "ffmpeg/tests/utils.c" "$PKG/src-snippets/"
+
+          cat > "$PKG/RUN_ENV.sh" <<'EOF'
           #!/usr/bin/env bash
-          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"
+          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1:allocator_may_return_null=1
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
-          export LD_LIBRARY_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib:${LD_LIBRARY_PATH:-}"
+          export PATH="$HERE/bin:$PATH"
           EOF
-          chmod +x "package/${{ matrix.name }}/RUN_ENV.sh"
+          chmod +x "$PKG/RUN_ENV.sh"
+
+          cat > "$PKG/README_RUN.txt" <<EOF
+          Build: ${{ matrix.name }}
+          Commit: $(cat FFMPEG_COMMIT.txt 2>/dev/null || echo unknown)
+
+          Usage:
+            cd ${{ matrix.name }}
+            source ./RUN_ENV.sh
+            ./bin/ffmpeg -version
+            ./bin/ffprobe -version
+
+          Common tests:
+            ./bin/ffprobe -v trace poc.oma
+            ./bin/ffprobe -v trace matroska_nan.mkv
+            ./bin/ffprobe -v error cmov_oom.mp4
+            ./bin/videogen /tmp/out.yuv 65536 65536
+          EOF
+
+          echo "[+] Packaged files:"
+          find "$PKG" -maxdepth 4 -type f | sort
+
+          echo "[+] Binary file info:"
+          find "$PKG/bin" -type f -maxdepth 1 -exec file {} \; || true
 
       - name: Zip build
+        shell: bash
         run: |
+          set -euxo pipefail
+
+          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
+
           cd package
-          zip -r "../ffmpeg-${{ matrix.name }}-x64-linux.zip" "${{ matrix.name }}"
+          zip -r "../$ZIP" "${{ matrix.name }}"
           cd ..
-          sha256sum "ffmpeg-${{ matrix.name }}-x64-linux.zip" | tee "ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256"
+
+          sha256sum "$ZIP" | tee "$ZIP.sha256"
+          ls -lh "$ZIP" "$ZIP.sha256"
 
       - name: Upload to sendit.sh
+        shell: bash
+        continue-on-error: true
         run: |
-          echo "Uploading ffmpeg-${{ matrix.name }}-x64-linux.zip"
-          LINK="$(curl -sS https://sendit.sh -T "ffmpeg-${{ matrix.name }}-x64-linux.zip")"
+          set -uxo pipefail
+
+          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
+          LINK_FILE="ffmpeg-${{ matrix.name }}-sendit-link.txt"
+
+          echo "[+] Uploading $ZIP to sendit.sh"
+
+          LINK=""
+          for i in 1 2 3 4 5; do
+            echo "[+] Upload attempt $i"
+            LINK="$(curl -fsS --retry 3 --retry-all-errors -T "$ZIP" https://sendit.sh || true)"
+
+            if echo "$LINK" | grep -Eiq 'https?://'; then
+              echo "[OK] Upload succeeded"
+              break
+            fi
+
+            echo "[WARN] Upload failed or no link returned. Response:"
+            echo "$LINK"
+            sleep 10
+          done
+
+          if ! echo "$LINK" | grep -Eiq 'https?://'; then
+            echo "[WARN] sendit upload failed after retries"
+            LINK="SENDIT_UPLOAD_FAILED_USE_GITHUB_ARTIFACT"
+          fi
+
           echo "Download link for ${{ matrix.name }}:"
           echo "$LINK"
-          echo "$LINK" > "ffmpeg-${{ matrix.name }}-sendit-link.txt"
+          echo "$LINK" > "$LINK_FILE"
 
       - name: Upload GitHub artifact backup
         uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-${{ matrix.name }}-x64-linux
+          if-no-files-found: error
+          retention-days: 7
           path: |
             ffmpeg-${{ matrix.name }}-x64-linux.zip
             ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256
