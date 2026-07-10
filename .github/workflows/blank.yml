@@ -1,15 +1,25 @@
-name: Build latest V8 security-research matrix
+name: Build V8 x64 security-research matrix
 
 on:
   workflow_dispatch:
     inputs:
       v8_ref:
-        description: "V8 Git ref or full 40-character commit SHA"
+        description: V8 Git ref or exact 40-character commit SHA
         required: true
-        default: "refs/heads/main"
+        default: refs/heads/main
+        type: string
+      v8_runner_label:
+        description: Runner label for the nine V8/d8 builds
+        required: true
+        default: ubuntu-24.04
+        type: string
+      chromium_runner_label:
+        description: Runner label for the Chromium build; use a larger or self-hosted x64 runner when available
+        required: true
+        default: ubuntu-24.04
         type: string
       keep_github_backup:
-        description: "Also retain each tar.gz as a GitHub Actions artifact for 3 days"
+        description: Retain each tar.gz as a GitHub artifact for three days
         required: true
         default: false
         type: boolean
@@ -18,54 +28,69 @@ permissions:
   contents: read
 
 concurrency:
-  group: v8-security-build-${{ github.repository }}-${{ github.ref }}
+  group: v8-x64-security-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   V8_REMOTE: https://chromium.googlesource.com/v8/v8.git
+  CHROMIUM_REMOTE: https://chromium.googlesource.com/chromium/src.git
   DEPOT_TOOLS_REMOTE: https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
 jobs:
-  resolve-v8:
-    name: Resolve one exact V8 revision
+  resolve-sources:
+    name: Resolve exact source revisions
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      revision: ${{ steps.resolve.outputs.revision }}
-      short_revision: ${{ steps.resolve.outputs.short_revision }}
+      v8_revision: ${{ steps.resolve.outputs.v8_revision }}
+      v8_short_revision: ${{ steps.resolve.outputs.v8_short_revision }}
+      chromium_revision: ${{ steps.resolve.outputs.chromium_revision }}
+      chromium_short_revision: ${{ steps.resolve.outputs.chromium_short_revision }}
     steps:
-      - name: Resolve requested ref
+      - name: Resolve V8 and Chromium revisions
         id: resolve
         shell: bash
         env:
-          REQUESTED_REF: ${{ inputs.v8_ref }}
+          REQUESTED_V8_REF: ${{ inputs.v8_ref }}
         run: |
           set -Eeuo pipefail
 
-          if [[ "$REQUESTED_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            revision="${REQUESTED_REF,,}"
-            # Confirm that the object exists remotely when the server allows SHA fetches.
-            git ls-remote "$V8_REMOTE" | grep -qi "$revision" || true
+          if [[ "$REQUESTED_V8_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            v8_revision="${REQUESTED_V8_REF,,}"
           else
-            revision="$(git ls-remote "$V8_REMOTE" "$REQUESTED_REF" | awk 'NR == 1 {print $1}')"
+            v8_revision="$(git ls-remote "$V8_REMOTE" "$REQUESTED_V8_REF" | awk 'NR == 1 {print $1}')"
           fi
 
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Could not resolve V8 ref: $REQUESTED_REF" >&2
+          chromium_revision="$(git ls-remote "$CHROMIUM_REMOTE" refs/heads/main | awk 'NR == 1 {print $1}')"
+
+          if [[ ! "$v8_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve V8 ref: $REQUESTED_V8_REF" >&2
+            exit 1
+          fi
+          if [[ ! "$chromium_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve Chromium main" >&2
             exit 1
           fi
 
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          echo "short_revision=${revision:0:12}" >> "$GITHUB_OUTPUT"
           {
-            echo "## V8 revision"
+            echo "v8_revision=$v8_revision"
+            echo "v8_short_revision=${v8_revision:0:12}"
+            echo "chromium_revision=$chromium_revision"
+            echo "chromium_short_revision=${chromium_revision:0:12}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Resolved revisions"
             echo
-            echo "All 11 builds are pinned to \`$revision\`."
+            echo "- Nine d8 builds use V8: \`$v8_revision\`"
+            echo "- Chromium build uses Chromium: \`$chromium_revision\`"
+            echo "- Chromium's pinned V8 revision is recorded by the Chromium job."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  build:
+  build-v8:
     name: ${{ matrix.order }} · ${{ matrix.id }}
-    needs: resolve-v8
+    needs: resolve-sources
+    runs-on: ${{ inputs.v8_runner_label }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -74,56 +99,27 @@ jobs:
         include:
           - order: "01"
             id: x64-release
-            runner: ubuntu-24.04
-            arch: x64
           - order: "02"
             id: x64-asan
-            runner: ubuntu-24.04
-            arch: x64
           - order: "03"
             id: x64-checks
-            runner: ubuntu-24.04
-            arch: x64
           - order: "04"
-            id: x64-ubsan
-            runner: ubuntu-24.04
-            arch: x64
+            id: x64-full-debug
           - order: "05"
-            id: x64-tsan
-            runner: ubuntu-24.04
-            arch: x64
+            id: x64-ubsan
           - order: "06"
-            id: x64-fuzzilli
-            runner: ubuntu-24.04
-            arch: x64
+            id: x64-tsan
           - order: "07"
-            id: x64-sandbox-release
-            runner: ubuntu-24.04
-            arch: x64
+            id: x64-fuzzilli
           - order: "08"
-            id: x64-sandbox-asan
-            runner: ubuntu-24.04
-            arch: x64
+            id: x64-sandbox-release
           - order: "09"
-            id: arm64-release
-            runner: ubuntu-24.04-arm
-            arch: arm64
-          - order: "10"
-            id: arm64-asan
-            runner: ubuntu-24.04-arm
-            arch: arm64
-          - order: "11"
-            id: arm64-sandbox-release
-            runner: ubuntu-24.04-arm
-            arch: arm64
-
-    runs-on: ${{ matrix.runner }}
+            id: x64-sandbox-asan
 
     env:
       BUILD_ID: ${{ matrix.id }}
-      TARGET_CPU: ${{ matrix.arch }}
-      V8_REVISION: ${{ needs.resolve-v8.outputs.revision }}
-      V8_SHORT_REVISION: ${{ needs.resolve-v8.outputs.short_revision }}
+      V8_REVISION: ${{ needs.resolve-sources.outputs.v8_revision }}
+      V8_SHORT_REVISION: ${{ needs.resolve-sources.outputs.v8_short_revision }}
       DEPOT_TOOLS: ${{ runner.temp }}/depot_tools
       CHECKOUT_ROOT: ${{ runner.temp }}/v8-checkout
       V8_DIR: ${{ runner.temp }}/v8-checkout/v8
@@ -131,18 +127,17 @@ jobs:
       PACKAGE_ROOT: ${{ runner.temp }}/v8-package
 
     steps:
-      - name: Show runner resources and reclaim disk
+      - name: Show resources and reclaim disk
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "Runner: $RUNNER_NAME"
           uname -a
+          echo "Runner: $RUNNER_NAME"
+          echo "Architecture: $RUNNER_ARCH"
           echo "CPUs: $(nproc)"
           free -h || true
           df -h
 
-          # Standard hosted runners expose limited free SSD space. These SDKs are
-          # not used by V8 and are safe to remove in this disposable VM.
           sudo rm -rf \
             /usr/local/lib/android \
             /usr/share/dotnet \
@@ -155,7 +150,7 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: Install host packages
+      - name: Install bootstrap packages
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -166,10 +161,10 @@ jobs:
             file \
             git \
             lsb-release \
-            ninja-build \
             pigz \
             pkg-config \
             python3 \
+            rsync \
             tar \
             unzip \
             xz-utils
@@ -181,9 +176,11 @@ jobs:
           git clone --depth=1 "$DEPOT_TOOLS_REMOTE" "$DEPOT_TOOLS"
           echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
           export PATH="$DEPOT_TOOLS:$PATH"
-          gclient --version
+          command -v fetch
+          command -v gclient
+          command -v gn
+          command -v autoninja
           gn --version
-          autoninja --version
 
       - name: Fetch V8 and synchronize exact dependencies
         shell: bash
@@ -193,59 +190,35 @@ jobs:
           mkdir -p "$CHECKOUT_ROOT"
           cd "$CHECKOUT_ROOT"
 
-          # --no-history saves substantial disk. The fallback keeps this workflow
-          # compatible if depot_tools changes that option in the future.
-          if ! fetch --nohooks --no-history v8; then
-            rm -rf "$CHECKOUT_ROOT/v8" "$CHECKOUT_ROOT/.gclient" "$CHECKOUT_ROOT/.gclient_entries"
-            fetch --nohooks v8
-          fi
-
+          fetch --nohooks --no-history v8
           cd "$V8_DIR"
+
           if ! git cat-file -e "$V8_REVISION^{commit}" 2>/dev/null; then
             git fetch --depth=1 origin "$V8_REVISION"
           fi
           git checkout --detach "$V8_REVISION"
 
-          if ! gclient sync \
-              --delete_unversioned_trees \
-              --force \
-              --reset \
-              --no-history \
-              --revision "v8@$V8_REVISION"; then
-            gclient sync \
-              --delete_unversioned_trees \
-              --force \
-              --reset \
-              --revision "v8@$V8_REVISION"
-          fi
+          gclient sync \
+            --delete_unversioned_trees \
+            --force \
+            --reset \
+            --no-history \
+            --revision "v8@$V8_REVISION"
 
           actual_revision="$(git rev-parse HEAD)"
-          if [[ "$actual_revision" != "$V8_REVISION" ]]; then
-            echo "Revision mismatch: wanted $V8_REVISION, got $actual_revision" >&2
-            exit 1
-          fi
-
-          git status --short
+          [[ "$actual_revision" == "$V8_REVISION" ]]
           df -h
 
-      - name: Install V8 Linux build dependencies and sysroot
+      - name: Install V8 Linux dependencies and x64 sysroot
         shell: bash
         run: |
           set -Eeuo pipefail
           export PATH="$DEPOT_TOOLS:$PATH"
           cd "$V8_DIR"
+          sudo env DEBIAN_FRONTEND=noninteractive ./build/install-build-deps.sh --no-prompt
+          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
 
-          sudo env DEBIAN_FRONTEND=noninteractive \
-            ./build/install-build-deps.sh --no-prompt
-
-          if [[ "$TARGET_CPU" == "arm64" ]]; then
-            sysroot_arch=arm64
-          else
-            sysroot_arch=amd64
-          fi
-          python3 build/linux/sysroot_scripts/install-sysroot.py --arch="$sysroot_arch"
-
-      - name: Generate validated args.gn
+      - name: Generate and validate args.gn
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -253,127 +226,159 @@ jobs:
           cd "$V8_DIR"
           mkdir -p "$OUT_DIR"
 
-          is_asan=false
-          is_lsan=false
-          is_tsan=false
-          is_ubsan=false
-          is_ubsan_no_recover=false
-          is_ubsan_vptr=false
-          dcheck_always_on=false
-          v8_static_library=false
-          v8_fuzzilli=false
-          memory_corruption_api=false
-          extra_args=""
+          cat > "$OUT_DIR/args.gn" <<'EOF'
+          target_os = "linux"
+          target_cpu = "x64"
+          is_official_build = false
+          is_component_build = false
+          is_clang = true
+          use_remoteexec = false
+          treat_warnings_as_errors = false
+          v8_enable_sandbox = true
+          EOF
+          sed -i 's/^          //' "$OUT_DIR/args.gn"
 
           case "$BUILD_ID" in
-            x64-release|arm64-release)
+            x64-release)
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = false
+          symbol_level = 1
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = false
+          EOF
               ;;
+
             x64-asan)
-              is_asan=true
-              is_lsan=true
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = false
+          symbol_level = 1
+          v8_symbol_level = 2
+          is_asan = true
+          is_lsan = false
+          v8_enable_memory_corruption_api = false
+          EOF
               ;;
-            arm64-asan)
-              # This matches V8's current native arm64 ASAN bot: ASAN without LSan.
-              is_asan=true
-              ;;
+
             x64-checks)
-              dcheck_always_on=true
-              extra_args='v8_enable_verification_features = true
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = true
+          symbol_level = 1
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = false
+          v8_enable_debugging_features = true
+          v8_enable_verification_features = true
           v8_enable_slow_dchecks = true
           v8_enable_verify_heap = true
           v8_enable_verify_write_barriers = true
           v8_enable_verify_csa = true
           v8_enable_backtrace = true
           v8_enable_object_print = true
-          v8_enable_disassembler = true'
+          v8_enable_disassembler = true
+          EOF
               ;;
+
+            x64-full-debug)
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = true
+          v8_optimized_debug = false
+          dcheck_always_on = true
+          symbol_level = 2
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = false
+          v8_enable_slow_dchecks = true
+          v8_enable_backtrace = true
+          v8_enable_object_print = true
+          v8_enable_disassembler = true
+          EOF
+              ;;
+
             x64-ubsan)
-              is_ubsan=true
-              is_ubsan_no_recover=true
-              is_ubsan_vptr=true
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = false
+          symbol_level = 1
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = false
+          is_ubsan = true
+          is_ubsan_no_recover = true
+          is_ubsan_vptr = true
+          EOF
               ;;
+
             x64-tsan)
-              is_tsan=true
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = false
+          symbol_level = 1
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = false
+          is_tsan = true
+          EOF
               ;;
+
             x64-fuzzilli)
-              dcheck_always_on=true
-              v8_static_library=true
-              v8_fuzzilli=true
-              extra_args='v8_enable_verify_heap = true
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = true
+          symbol_level = 1
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = false
+          v8_static_library = true
+          v8_enable_verify_heap = true
           v8_enable_partition_alloc = false
-          sanitizer_coverage_flags = "trace-pc-guard"'
+          v8_fuzzilli = true
+          sanitizer_coverage_flags = "trace-pc-guard"
+          EOF
               ;;
-            x64-sandbox-release|arm64-sandbox-release)
-              memory_corruption_api=true
+
+            x64-sandbox-release)
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = false
+          symbol_level = 1
+          v8_symbol_level = 2
+          v8_enable_memory_corruption_api = true
+          EOF
               ;;
+
             x64-sandbox-asan)
-              is_asan=true
-              # Required: V8 rejects memory_corruption_api + LSan because both use ptrace.
-              is_lsan=false
-              memory_corruption_api=true
+              cat >> "$OUT_DIR/args.gn" <<'EOF'
+          is_debug = false
+          dcheck_always_on = false
+          symbol_level = 1
+          v8_symbol_level = 2
+          is_asan = true
+          is_lsan = false
+          v8_enable_memory_corruption_api = true
+          EOF
               ;;
+
             *)
               echo "Unknown build id: $BUILD_ID" >&2
               exit 1
               ;;
           esac
 
-          cat > "$OUT_DIR/args.gn" <<EOF
-          target_os = "linux"
-          target_cpu = "$TARGET_CPU"
-
-          is_debug = false
-          is_official_build = false
-          dcheck_always_on = $dcheck_always_on
-          is_component_build = false
-          is_clang = true
-          treat_warnings_as_errors = false
-
-          is_asan = $is_asan
-          is_lsan = $is_lsan
-          is_tsan = $is_tsan
-          is_ubsan = $is_ubsan
-          is_ubsan_no_recover = $is_ubsan_no_recover
-          is_ubsan_vptr = $is_ubsan_vptr
-
-          symbol_level = 1
-          v8_symbol_level = 2
-
-          use_custom_libcxx = true
-          use_safe_libcxx = true
-
-          v8_enable_sandbox = true
-          v8_enable_memory_corruption_api = $memory_corruption_api
-          v8_static_library = $v8_static_library
-          v8_fuzzilli = $v8_fuzzilli
-          EOF
-
-          if [[ -n "$extra_args" ]]; then
-            printf '%s\n' "$extra_args" >> "$OUT_DIR/args.gn"
-          fi
-
           sed -i 's/^          //' "$OUT_DIR/args.gn"
-          echo "===== args.gn for $BUILD_ID ====="
+          echo "===== $BUILD_ID args.gn ====="
           cat "$OUT_DIR/args.gn"
 
-          # This turns stale or misspelled GN variables into hard failures.
           gn gen "$OUT_DIR" --fail-on-unused-args
           gn args "$OUT_DIR" --list --short > "$OUT_DIR/effective-args.txt"
-          gn desc "$OUT_DIR" //:d8 runtime_deps > "$OUT_DIR/d8-runtime-deps.txt" || true
 
-      - name: Build d8 with every available CPU
+      - name: Build d8 with all available CPUs
         shell: bash
         run: |
           set -Eeuo pipefail
           export PATH="$DEPOT_TOOLS:$PATH"
           cd "$V8_DIR"
-
-          jobs="$(nproc)"
-          echo "Building $BUILD_ID with $jobs Ninja workers"
-          autoninja -C "$OUT_DIR" -j "$jobs" d8
+          autoninja -C "$OUT_DIR" -j "$(nproc)" d8
           df -h
 
-      - name: Smoke-test the produced runtime
+      - name: Smoke-test d8 and security modes
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -386,13 +391,13 @@ jobs:
 
           cat > "$RUNNER_TEMP/v8-smoke.js" <<'JS'
           print("V8 version: " + version());
-          print("architecture smoke test passed");
+          print("x64 smoke test passed");
           JS
 
           "$OUT_DIR/d8" "$RUNNER_TEMP/v8-smoke.js"
           "$OUT_DIR/d8" --run-as-security-poc "$RUNNER_TEMP/v8-smoke.js"
 
-          if [[ "$BUILD_ID" == *sandbox* ]]; then
+          if [[ "$BUILD_ID" == x64-sandbox-* ]]; then
             cat > "$RUNNER_TEMP/v8-sandbox-smoke.js" <<'JS'
           if (typeof Sandbox !== "object") {
             throw new Error("Sandbox memory-corruption API was not exposed");
@@ -402,7 +407,7 @@ jobs:
             "$OUT_DIR/d8" --run-as-sandbox-security-poc "$RUNNER_TEMP/v8-sandbox-smoke.js"
           fi
 
-      - name: Package portable build bundle
+      - name: Package portable d8 bundle
         id: package
         shell: bash
         run: |
@@ -411,29 +416,28 @@ jobs:
           cd "$V8_DIR"
 
           stage="$PACKAGE_ROOT/v8-$BUILD_ID-$V8_SHORT_REVISION"
-          archive="$RUNNER_TEMP/v8-$BUILD_ID-$V8_SHORT_REVISION-linux-$TARGET_CPU.tar.gz"
+          archive="$RUNNER_TEMP/v8-$BUILD_ID-$V8_SHORT_REVISION-linux-x64.tar.gz"
           mkdir -p "$stage"
 
-          # Keep the runtime, startup data, shared runtime libraries if any, and
-          # the exact configuration needed to reproduce the build.
           find "$OUT_DIR" -maxdepth 1 -type f \
             \( -name 'd8' \
                -o -name '*.bin' \
                -o -name '*.dat' \
                -o -name '*.json' \
+               -o -name '*.pak' \
                -o -name '*.so' \
                -o -name '*.so.*' \) \
             -exec cp -a {} "$stage/" \;
 
           cp "$OUT_DIR/args.gn" "$stage/args.gn"
           cp "$OUT_DIR/effective-args.txt" "$stage/effective-args.txt"
-          cp "$OUT_DIR/d8-runtime-deps.txt" "$stage/d8-runtime-deps.txt" || true
+          gn desc "$OUT_DIR" //:d8 runtime_deps > "$stage/d8-runtime-deps.txt" || true
 
           {
             echo "build_id=$BUILD_ID"
             echo "v8_revision=$V8_REVISION"
             echo "target_os=linux"
-            echo "target_cpu=$TARGET_CPU"
+            echo "target_cpu=x64"
             echo "runner=$RUNNER_NAME"
             echo "runner_arch=$RUNNER_ARCH"
             echo "nproc=$(nproc)"
@@ -460,7 +464,7 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "archive_name=$(basename "$archive")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload archive to sendit.sh
+      - name: Upload d8 archive to sendit.sh
         id: sendit
         shell: bash
         env:
@@ -468,24 +472,20 @@ jobs:
           ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
         run: |
           set -Eeuo pipefail
-
           response="$(curl \
             --fail-with-body \
             --location \
             --retry 5 \
             --retry-all-errors \
             --connect-timeout 30 \
-            --upload-file "$ARCHIVE" \
+            -T "$ARCHIVE" \
             https://sendit.sh)"
 
           printf '%s\n' "$response"
           url="$(printf '%s\n' "$response" | grep -Eo 'https?://[^[:space:]<>]+' | tail -n 1)"
-          if [[ -z "$url" ]]; then
-            echo "sendit.sh did not return a download URL" >&2
-            exit 1
-          fi
+          [[ -n "$url" ]]
 
-          link_file="$RUNNER_TEMP/sendit-link-$BUILD_ID.txt"
+          link_file="$RUNNER_TEMP/sendit-link-${{ matrix.order }}-$BUILD_ID.txt"
           printf '%s\t%s\t%s\n' "$BUILD_ID" "$ARCHIVE_NAME" "$url" > "$link_file"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "link_file=$link_file" >> "$GITHUB_OUTPUT"
@@ -499,7 +499,7 @@ jobs:
             echo "- SHA-256: \`$(sha256sum "$ARCHIVE" | awk '{print $1}')\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Save sendit link for final summary
+      - name: Save d8 link record
         uses: actions/upload-artifact@v4
         with:
           name: sendit-link-${{ matrix.order }}-${{ matrix.id }}
@@ -508,19 +508,350 @@ jobs:
           retention-days: 3
           compression-level: 0
 
-      - name: Optional GitHub artifact backup
+      - name: Optional d8 GitHub artifact backup
         if: ${{ inputs.keep_github_backup }}
         uses: actions/upload-artifact@v4
         with:
-          name: v8-${{ matrix.id }}-${{ needs.resolve-v8.outputs.short_revision }}
+          name: v8-${{ matrix.id }}-${{ needs.resolve-sources.outputs.v8_short_revision }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  build-chromium:
+    name: 10 · chromium-x64-optimized
+    needs: [resolve-sources, build-v8]
+    runs-on: ${{ inputs.chromium_runner_label }}
+    timeout-minutes: 360
+    env:
+      CHROMIUM_REVISION: ${{ needs.resolve-sources.outputs.chromium_revision }}
+      CHROMIUM_SHORT_REVISION: ${{ needs.resolve-sources.outputs.chromium_short_revision }}
+      DEPOT_TOOLS: ${{ runner.temp }}/depot_tools
+      CHECKOUT_ROOT: ${{ runner.temp }}/chromium-checkout
+      CHROMIUM_DIR: ${{ runner.temp }}/chromium-checkout/src
+      OUT_DIR: ${{ runner.temp }}/chromium-checkout/src/out/security-chrome
+      PACKAGE_ROOT: ${{ runner.temp }}/chromium-package
+
+    steps:
+      - name: Show resources and reclaim disk aggressively
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          uname -a
+          echo "Runner: $RUNNER_NAME"
+          echo "Architecture: $RUNNER_ARCH"
+          echo "CPUs: $(nproc)"
+          free -h || true
+          df -h
+
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /opt/hostedtoolcache \
+            /usr/local/lib/node_modules \
+            2>/dev/null || true
+          sudo docker system prune --all --force --volumes 2>/dev/null || true
+          sudo apt-get clean
+          df -h
+
+      - name: Install Chromium bootstrap packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            lsb-release \
+            pigz \
+            pkg-config \
+            python3 \
+            rsync \
+            tar \
+            unzip \
+            xz-utils
+
+      - name: Install current depot_tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --depth=1 "$DEPOT_TOOLS_REMOTE" "$DEPOT_TOOLS"
+          echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
+          export PATH="$DEPOT_TOOLS:$PATH"
+          command -v fetch
+          command -v gclient
+          command -v gn
+          command -v autoninja
+
+      - name: Fetch Chromium and synchronize exact dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          mkdir -p "$CHECKOUT_ROOT"
+          cd "$CHECKOUT_ROOT"
+
+          fetch --nohooks --no-history chromium
+          cd "$CHROMIUM_DIR"
+
+          if ! git cat-file -e "$CHROMIUM_REVISION^{commit}" 2>/dev/null; then
+            git fetch --depth=1 origin "$CHROMIUM_REVISION"
+          fi
+          git checkout --detach "$CHROMIUM_REVISION"
+
+          gclient sync \
+            --delete_unversioned_trees \
+            --force \
+            --reset \
+            --no-history \
+            --revision "src@$CHROMIUM_REVISION"
+
+          actual_revision="$(git rev-parse HEAD)"
+          [[ "$actual_revision" == "$CHROMIUM_REVISION" ]]
+          git -C v8 rev-parse HEAD > "$RUNNER_TEMP/chromium-v8-revision.txt"
+          df -h
+
+      - name: Install Chromium Linux dependencies and x64 sysroot
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          cd "$CHROMIUM_DIR"
+          sudo env DEBIAN_FRONTEND=noninteractive ./build/install-build-deps.sh --no-prompt
+          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
+
+      - name: Generate optimized x64 Chromium args.gn
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          cd "$CHROMIUM_DIR"
+          mkdir -p "$OUT_DIR"
+
+          cat > "$OUT_DIR/args.gn" <<'EOF'
+          target_os = "linux"
+          target_cpu = "x64"
+          is_debug = false
+          dcheck_always_on = false
+          is_official_build = false
+          is_component_build = true
+          use_remoteexec = false
+          symbol_level = 0
+          blink_symbol_level = 0
+          v8_symbol_level = 2
+          treat_warnings_as_errors = false
+          EOF
+          sed -i 's/^          //' "$OUT_DIR/args.gn"
+
+          cat "$OUT_DIR/args.gn"
+          gn gen "$OUT_DIR" --fail-on-unused-args
+          gn args "$OUT_DIR" --list --short > "$OUT_DIR/effective-args.txt"
+
+      - name: Build optimized Chromium with all available CPUs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          cd "$CHROMIUM_DIR"
+          autoninja -C "$OUT_DIR" -j "$(nproc)" chrome
+          df -h
+
+      - name: Smoke-test Chromium without disabling its sandbox
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$CHROMIUM_DIR"
+
+          if [[ -f "$OUT_DIR/chrome_sandbox" ]]; then
+            sudo chown root:root "$OUT_DIR/chrome_sandbox"
+            sudo chmod 4755 "$OUT_DIR/chrome_sandbox"
+          fi
+
+          cat > "$RUNNER_TEMP/chromium-smoke.html" <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>V8 security build smoke test</title>
+          <body><script>
+          document.body.textContent =
+            "JavaScript=" + (1 + 1) + "; WebAssembly=" + typeof WebAssembly;
+          </script></body>
+          HTML
+
+          "$OUT_DIR/chrome" \
+            --headless \
+            --disable-gpu \
+            --no-first-run \
+            --user-data-dir="$RUNNER_TEMP/chromium-profile" \
+            --dump-dom \
+            "file://$RUNNER_TEMP/chromium-smoke.html" \
+            | tee "$RUNNER_TEMP/chromium-smoke-output.txt"
+
+          grep -q 'JavaScript=2; WebAssembly=object' "$RUNNER_TEMP/chromium-smoke-output.txt"
+
+      - name: Package Chromium runtime dependencies
+        id: package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$DEPOT_TOOLS:$PATH"
+          cd "$CHROMIUM_DIR"
+
+          chromium_v8_revision="$(cat "$RUNNER_TEMP/chromium-v8-revision.txt")"
+          stage="$PACKAGE_ROOT/chromium-x64-optimized-$CHROMIUM_SHORT_REVISION"
+          archive="$RUNNER_TEMP/chromium-x64-optimized-$CHROMIUM_SHORT_REVISION-linux-x64.tar.gz"
+          mkdir -p "$stage"
+
+          gn desc "$OUT_DIR" //chrome runtime_deps > "$RUNNER_TEMP/chrome-runtime-deps.txt"
+
+          python3 - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          source_root = Path(os.environ["CHROMIUM_DIR"]).resolve()
+          out_dir = Path(os.environ["OUT_DIR"]).resolve()
+          stage = Path(os.environ["PACKAGE_ROOT"]).resolve() / (
+              "chromium-x64-optimized-" + os.environ["CHROMIUM_SHORT_REVISION"]
+          )
+          deps_file = Path(os.environ["RUNNER_TEMP"]) / "chrome-runtime-deps.txt"
+
+          copied = 0
+          for raw in deps_file.read_text(encoding="utf-8").splitlines():
+              item = raw.strip()
+              if not item or item.startswith("["):
+                  continue
+              if item.startswith("//"):
+                  src = source_root / item[2:]
+              else:
+                  src = Path(item)
+                  if not src.is_absolute():
+                      src = source_root / src
+              src = src.resolve()
+              if not src.exists():
+                  continue
+
+              try:
+                  rel = src.relative_to(out_dir)
+              except ValueError:
+                  try:
+                      rel = Path("source-runtime-deps") / src.relative_to(source_root)
+                  except ValueError:
+                      rel = Path("external-runtime-deps") / src.name
+
+              dst = stage / rel
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              if src.is_dir():
+                  shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=True)
+              else:
+                  shutil.copy2(src, dst, follow_symlinks=False)
+              copied += 1
+
+          if copied == 0 or not (stage / "chrome").exists():
+              raise SystemExit("Failed to collect Chromium runtime dependencies")
+          print(f"Copied {copied} runtime dependency entries")
+          PY
+
+          cp "$OUT_DIR/args.gn" "$stage/args.gn"
+          cp "$OUT_DIR/effective-args.txt" "$stage/effective-args.txt"
+          cp "$RUNNER_TEMP/chrome-runtime-deps.txt" "$stage/chrome-runtime-deps.txt"
+          cp "$RUNNER_TEMP/chromium-smoke-output.txt" "$stage/chromium-smoke-output.txt"
+
+          {
+            echo "build_id=chromium-x64-optimized"
+            echo "chromium_revision=$CHROMIUM_REVISION"
+            echo "chromium_v8_revision=$chromium_v8_revision"
+            echo "target_os=linux"
+            echo "target_cpu=x64"
+            echo "is_component_build=true"
+            echo "runner=$RUNNER_NAME"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "nproc=$(nproc)"
+            echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "depot_tools_revision=$(git -C "$DEPOT_TOOLS" rev-parse HEAD)"
+          } > "$stage/BUILD_INFO.txt"
+
+          file "$stage/chrome" > "$stage/file-chrome.txt"
+          ldd "$stage/chrome" > "$stage/ldd-chrome.txt" 2>&1 || true
+          "$stage/chrome" --version > "$stage/chrome-version.txt" 2>&1 || true
+
+          (
+            cd "$stage"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+
+          tar -C "$PACKAGE_ROOT" -cf - "$(basename "$stage")" \
+            | pigz -1 -p "$(nproc)" > "$archive"
+
+          test -s "$archive"
+          sha256sum "$archive"
+          ls -lh "$archive"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$(basename "$archive")" >> "$GITHUB_OUTPUT"
+          echo "chromium_v8_revision=$chromium_v8_revision" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Chromium archive to sendit.sh
+        id: sendit
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+        run: |
+          set -Eeuo pipefail
+          response="$(curl \
+            --fail-with-body \
+            --location \
+            --retry 5 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            -T "$ARCHIVE" \
+            https://sendit.sh)"
+
+          printf '%s\n' "$response"
+          url="$(printf '%s\n' "$response" | grep -Eo 'https?://[^[:space:]<>]+' | tail -n 1)"
+          [[ -n "$url" ]]
+
+          link_file="$RUNNER_TEMP/sendit-link-10-chromium-x64-optimized.txt"
+          printf '%s\t%s\t%s\n' "chromium-x64-optimized" "$ARCHIVE_NAME" "$url" > "$link_file"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "link_file=$link_file" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## chromium-x64-optimized"
+            echo
+            echo "- Chromium revision: \`$CHROMIUM_REVISION\`"
+            echo "- Chromium-pinned V8: \`${{ steps.package.outputs.chromium_v8_revision }}\`"
+            echo "- Archive: \`$ARCHIVE_NAME\`"
+            echo "- Download: $url"
+            echo "- SHA-256: \`$(sha256sum "$ARCHIVE" | awk '{print $1}')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save Chromium link record
+        uses: actions/upload-artifact@v4
+        with:
+          name: sendit-link-10-chromium-x64-optimized
+          path: ${{ steps.sendit.outputs.link_file }}
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Optional Chromium GitHub artifact backup
+        if: ${{ inputs.keep_github_backup }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-x64-optimized-${{ needs.resolve-sources.outputs.chromium_short_revision }}
           path: ${{ steps.package.outputs.archive }}
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
 
   collect-links:
-    name: Collect all download links
-    needs: [resolve-v8, build]
+    name: Collect all ten download links
+    needs: [resolve-sources, build-v8, build-chromium]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -532,40 +863,42 @@ jobs:
           path: links
           merge-multiple: true
 
-      - name: Create final link list
+      - name: Create final link table
         shell: bash
         env:
-          V8_REVISION: ${{ needs.resolve-v8.outputs.revision }}
+          V8_REVISION: ${{ needs.resolve-sources.outputs.v8_revision }}
+          CHROMIUM_REVISION: ${{ needs.resolve-sources.outputs.chromium_revision }}
         run: |
           set -Eeuo pipefail
           shopt -s nullglob
           files=(links/sendit-link-*.txt)
 
           {
-            echo "# V8 security-research build links"
+            echo "# V8 x64 security-research build links"
             echo
-            echo "V8 revision: \`$V8_REVISION\`"
+            echo "- Standalone V8 revision: \`$V8_REVISION\`"
+            echo "- Chromium revision: \`$CHROMIUM_REVISION\`"
             echo
             echo "| Build | Archive | Download |"
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
           : > all-sendit-links.txt
-          for file in "${files[@]}"; do
+          for file in $(printf '%s\n' "${files[@]}" | sort); do
             IFS=$'\t' read -r build archive url < "$file"
             printf '%s\t%s\t%s\n' "$build" "$archive" "$url" >> all-sendit-links.txt
             printf '| `%s` | `%s` | %s |\n' "$build" "$archive" "$url" >> "$GITHUB_STEP_SUMMARY"
           done
 
-          if (( ${#files[@]} != 11 )); then
-            echo "Expected 11 successful uploads, found ${#files[@]}." >&2
+          if (( ${#files[@]} != 10 )); then
+            echo "Expected 10 successful uploads, found ${#files[@]}." >&2
             exit 1
           fi
 
       - name: Retain combined link list
         uses: actions/upload-artifact@v4
         with:
-          name: all-sendit-links-${{ needs.resolve-v8.outputs.short_revision }}
+          name: all-sendit-links-${{ needs.resolve-sources.outputs.v8_short_revision }}
           path: all-sendit-links.txt
           if-no-files-found: error
           retention-days: 3
