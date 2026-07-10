@@ -21,73 +21,54 @@ jobs:
           - name: release
             cc: gcc
             cxx: g++
-            configure_flags: >-
-              --disable-stripping
-              --enable-debug=2
-              --extra-cflags=-O2 -g -fno-omit-frame-pointer
+            configure_extra: "--disable-stripping --enable-debug=2"
+            cflags: "-O2 -g -fno-omit-frame-pointer"
+            ldflags: ""
             essential_targets: "ffmpeg ffprobe"
             optional_targets: ""
 
           - name: debug
             cc: gcc
             cxx: g++
-            configure_flags: >-
-              --disable-stripping
-              --enable-debug=3
-              --disable-optimizations
-              --extra-cflags=-O0 -g3 -fno-omit-frame-pointer
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations"
+            cflags: "-O0 -g3 -fno-omit-frame-pointer"
+            ldflags: ""
             essential_targets: "ffmpeg ffprobe"
             optional_targets: ""
 
           - name: asan-ubsan
             cc: clang
             cxx: clang++
-            configure_flags: >-
-              --disable-stripping
-              --enable-debug=3
-              --disable-optimizations
-              --toolchain=clang-asan
-              --extra-cflags=-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
-              --extra-ldflags=-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
+            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
             essential_targets: "ffmpeg ffprobe"
             optional_targets: "tests/videogen tools/target_dem_fuzzer"
 
           - name: ubsan-strict
             cc: clang
             cxx: clang++
-            configure_flags: >-
-              --disable-stripping
-              --enable-debug=3
-              --disable-optimizations
-              --cc=clang
-              --cxx=clang++
-              --extra-cflags=-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer -fno-sanitize-recover=all
-              --extra-ldflags=-fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --cc=clang --cxx=clang++"
+            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
+            ldflags: "-fsanitize=undefined,signed-integer-overflow,float-cast-overflow"
             essential_targets: "ffmpeg ffprobe"
             optional_targets: "tests/videogen"
 
           - name: shared-dev
             cc: gcc
             cxx: g++
-            configure_flags: >-
-              --disable-stripping
-              --enable-shared
-              --disable-static
-              --enable-debug=2
-              --extra-cflags=-O1 -g3 -fno-omit-frame-pointer
+            configure_extra: "--disable-stripping --enable-shared --disable-static --enable-debug=2"
+            cflags: "-O1 -g3 -fno-omit-frame-pointer"
+            ldflags: ""
             essential_targets: "ffmpeg ffprobe"
             optional_targets: ""
 
           - name: fate-tools-asan
             cc: clang
             cxx: clang++
-            configure_flags: >-
-              --disable-stripping
-              --enable-debug=3
-              --disable-optimizations
-              --toolchain=clang-asan
-              --extra-cflags=-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
-              --extra-ldflags=-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
+            cflags: "-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
             essential_targets: "ffmpeg ffprobe"
             optional_targets: "tests/videogen tools/target_dem_fuzzer"
 
@@ -96,6 +77,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
             git build-essential clang lld pkg-config yasm nasm \
@@ -106,6 +88,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           git clone https://github.com/FFmpeg/FFmpeg.git ffmpeg
           cd ffmpeg
           git checkout "${{ github.event.inputs.ffmpeg_ref }}"
@@ -118,14 +101,32 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
+          CONFIGURE_EXTRA: ${{ matrix.configure_extra }}
+          CFLAGS_EXTRA: ${{ matrix.cflags }}
+          LDFLAGS_EXTRA: ${{ matrix.ldflags }}
         run: |
           set -euxo pipefail
 
           mkdir -p "../out/${{ matrix.name }}"
 
-          ./configure \
-            --prefix="$PWD/../out/${{ matrix.name }}" \
-            ${{ matrix.configure_flags }}
+          read -r -a CFG_ARGS <<< "$CONFIGURE_EXTRA"
+
+          CMD=(
+            ./configure
+            --prefix="$PWD/../out/${{ matrix.name }}"
+            "${CFG_ARGS[@]}"
+            --extra-cflags="$CFLAGS_EXTRA"
+          )
+
+          if [ -n "$LDFLAGS_EXTRA" ]; then
+            CMD+=(--extra-ldflags="$LDFLAGS_EXTRA")
+          fi
+
+          echo "[+] Configure command:"
+          printf ' %q' "${CMD[@]}"
+          printf '\n'
+
+          "${CMD[@]}"
 
       - name: Build essential targets
         shell: bash
@@ -134,6 +135,7 @@ jobs:
           set -euxo pipefail
 
           echo "[+] Building essential targets: ${{ matrix.essential_targets }}"
+
           for target in ${{ matrix.essential_targets }}; do
             echo "[+] make $target"
             make -j"$(nproc)" "$target"
@@ -148,27 +150,28 @@ jobs:
           echo "[+] Optional targets: ${{ matrix.optional_targets }}"
 
           for target in ${{ matrix.optional_targets }}; do
-            echo "[+] Attempting optional target: $target"
+            echo "[+] Trying optional target: $target"
             if make -j"$(nproc)" "$target"; then
               echo "[OK] Built optional target: $target"
             else
-              echo "[WARN] Optional target failed or unavailable: $target"
+              echo "[WARN] Optional target failed or does not exist: $target"
             fi
           done
 
-          # Fallback manual videogen build if make target did not produce it.
           if echo "${{ matrix.optional_targets }}" | grep -q "tests/videogen"; then
             if [ ! -x tests/videogen ]; then
               echo "[WARN] tests/videogen missing. Trying manual fallback compile."
 
               if echo "${{ matrix.name }}" | grep -Eq "asan|ubsan"; then
-                ${{ matrix.cc }} -O0 -g3 -fno-omit-frame-pointer \
+                ${{ matrix.cc }} \
+                  -O0 -g3 -fno-omit-frame-pointer \
                   -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow \
                   -I. -I./ \
                   -o tests/videogen \
                   tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
               else
-                ${{ matrix.cc }} -O0 -g3 -fno-omit-frame-pointer \
+                ${{ matrix.cc }} \
+                  -O0 -g3 -fno-omit-frame-pointer \
                   -I. -I./ \
                   -o tests/videogen \
                   tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
@@ -202,6 +205,7 @@ jobs:
           copy_if_exists() {
             SRC="$1"
             DST="$2"
+
             if [ -e "$SRC" ]; then
               cp -a "$SRC" "$DST"
               echo "[copy] $SRC -> $DST"
@@ -213,6 +217,7 @@ jobs:
           copy_dir_if_exists() {
             SRC="$1"
             DST="$2"
+
             if [ -d "$SRC" ]; then
               mkdir -p "$DST"
               cp -a "$SRC/." "$DST/" || true
@@ -222,28 +227,31 @@ jobs:
             fi
           }
 
-          # Build-tree binaries
           copy_if_exists "ffmpeg/ffmpeg" "$PKG/bin/"
           copy_if_exists "ffmpeg/ffprobe" "$PKG/bin/"
           copy_if_exists "ffmpeg/ffplay" "$PKG/bin/"
           copy_if_exists "ffmpeg/tests/videogen" "$PKG/bin/"
           copy_if_exists "ffmpeg/tools/target_dem_fuzzer" "$PKG/bin/"
 
-          # Installed binaries
           copy_if_exists "$PREFIX/bin/ffmpeg" "$PKG/bin/"
           copy_if_exists "$PREFIX/bin/ffprobe" "$PKG/bin/"
           copy_if_exists "$PREFIX/bin/ffplay" "$PKG/bin/"
 
-          # Installed libs/includes
           copy_dir_if_exists "$PREFIX/lib" "$PKG/lib"
           copy_dir_if_exists "$PREFIX/include" "$PKG/include"
 
-          # Build-tree static libs as fallback
-          for lib in ffmpeg/libavutil/libavutil.a ffmpeg/libavcodec/libavcodec.a ffmpeg/libavformat/libavformat.a ffmpeg/libavdevice/libavdevice.a ffmpeg/libavfilter/libavfilter.a ffmpeg/libswscale/libswscale.a ffmpeg/libswresample/libswresample.a; do
+          for lib in \
+            ffmpeg/libavutil/libavutil.a \
+            ffmpeg/libavcodec/libavcodec.a \
+            ffmpeg/libavformat/libavformat.a \
+            ffmpeg/libavdevice/libavdevice.a \
+            ffmpeg/libavfilter/libavfilter.a \
+            ffmpeg/libswscale/libswscale.a \
+            ffmpeg/libswresample/libswresample.a
+          do
             copy_if_exists "$lib" "$PKG/lib/"
           done
 
-          # Config/build info paths vary by version
           copy_if_exists "ffmpeg/config.h" "$PKG/build-info/"
           copy_if_exists "ffmpeg/config.log" "$PKG/build-info/"
           copy_if_exists "ffmpeg/ffbuild/config.log" "$PKG/build-info/"
@@ -251,19 +259,22 @@ jobs:
           copy_if_exists "ffmpeg/ffbuild/config.sh" "$PKG/build-info/"
           copy_if_exists "FFMPEG_COMMIT.txt" "$PKG/build-info/"
 
-          # Useful source files for reports
-          copy_if_exists "ffmpeg/libavformat/http.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavformat/rtsp.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavformat/mov.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavformat/concatdec.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavformat/id3v2.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavformat/omadec.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavformat/matroskadec.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavutil/rc4.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavutil/blowfish.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/libavutil/aes_ctr.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/tests/videogen.c" "$PKG/src-snippets/"
-          copy_if_exists "ffmpeg/tests/utils.c" "$PKG/src-snippets/"
+          for src in \
+            ffmpeg/libavformat/http.c \
+            ffmpeg/libavformat/rtsp.c \
+            ffmpeg/libavformat/mov.c \
+            ffmpeg/libavformat/concatdec.c \
+            ffmpeg/libavformat/id3v2.c \
+            ffmpeg/libavformat/omadec.c \
+            ffmpeg/libavformat/matroskadec.c \
+            ffmpeg/libavutil/rc4.c \
+            ffmpeg/libavutil/blowfish.c \
+            ffmpeg/libavutil/aes_ctr.c \
+            ffmpeg/tests/videogen.c \
+            ffmpeg/tests/utils.c
+          do
+            copy_if_exists "$src" "$PKG/src-snippets/"
+          done
 
           cat > "$PKG/RUN_ENV.sh" <<'EOF'
           #!/usr/bin/env bash
@@ -273,6 +284,7 @@ jobs:
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
           export PATH="$HERE/bin:$PATH"
           EOF
+
           chmod +x "$PKG/RUN_ENV.sh"
 
           cat > "$PKG/README_RUN.txt" <<EOF
@@ -296,7 +308,7 @@ jobs:
           find "$PKG" -maxdepth 4 -type f | sort
 
           echo "[+] Binary file info:"
-          find "$PKG/bin" -type f -maxdepth 1 -exec file {} \; || true
+          find "$PKG/bin" -maxdepth 1 -type f -exec file {} \; || true
 
       - name: Zip build
         shell: bash
@@ -324,8 +336,10 @@ jobs:
           echo "[+] Uploading $ZIP to sendit.sh"
 
           LINK=""
+
           for i in 1 2 3 4 5; do
             echo "[+] Upload attempt $i"
+
             LINK="$(curl -fsS --retry 3 --retry-all-errors -T "$ZIP" https://sendit.sh || true)"
 
             if echo "$LINK" | grep -Eiq 'https?://'; then
