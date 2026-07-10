@@ -35,6 +35,7 @@ env:
   V8_REMOTE: https://chromium.googlesource.com/v8/v8.git
   CHROMIUM_REMOTE: https://chromium.googlesource.com/chromium/src.git
   DEPOT_TOOLS_REMOTE: https://chromium.googlesource.com/chromium/tools/depot_tools.git
+  DEPOT_TOOLS_UPDATE: "0"
 
 jobs:
   resolve-sources:
@@ -169,17 +170,25 @@ jobs:
             unzip \
             xz-utils
 
-      - name: Install current depot_tools
+      - name: Install and bootstrap current depot_tools
         shell: bash
         run: |
           set -Eeuo pipefail
           git clone --depth=1 "$DEPOT_TOOLS_REMOTE" "$DEPOT_TOOLS"
           echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
           export PATH="$DEPOT_TOOLS:$PATH"
+
+          # A fresh depot_tools clone does not yet contain its CIPD-managed
+          # Python/tool bootstrap. Initialize the current checkout explicitly
+          # before invoking gclient, fetch, gn, or autoninja.
+          "$DEPOT_TOOLS/ensure_bootstrap"
+
+          test -s "$DEPOT_TOOLS/python3_bin_reldir.txt"
           command -v fetch
           command -v gclient
           command -v gn
           command -v autoninja
+          gclient --version
           gn --version
 
       - name: Fetch V8 and synchronize exact dependencies
@@ -576,17 +585,25 @@ jobs:
             unzip \
             xz-utils
 
-      - name: Install current depot_tools
+      - name: Install and bootstrap current depot_tools
         shell: bash
         run: |
           set -Eeuo pipefail
           git clone --depth=1 "$DEPOT_TOOLS_REMOTE" "$DEPOT_TOOLS"
           echo "$DEPOT_TOOLS" >> "$GITHUB_PATH"
           export PATH="$DEPOT_TOOLS:$PATH"
+
+          # Bootstrap the CIPD-managed Python and helper tools in this exact
+          # depot_tools checkout before any wrapper is executed.
+          "$DEPOT_TOOLS/ensure_bootstrap"
+
+          test -s "$DEPOT_TOOLS/python3_bin_reldir.txt"
           command -v fetch
           command -v gclient
           command -v gn
           command -v autoninja
+          gclient --version
+          gn --version
 
       - name: Fetch Chromium and synchronize exact dependencies
         shell: bash
