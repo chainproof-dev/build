@@ -1,0 +1,155 @@
+name: Build FFmpeg Security Runtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_ref:
+        description: "FFmpeg git ref, branch, tag, or commit"
+        required: false
+        default: "master"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            configure_flags: >-
+              --disable-stripping
+              --enable-debug=2
+              --extra-cflags="-O2 -g -fno-omit-frame-pointer"
+              --extra-ldflags=""
+            make_targets: "ffmpeg ffprobe"
+
+          - name: debug
+            configure_flags: >-
+              --disable-stripping
+              --enable-debug=3
+              --disable-optimizations
+              --extra-cflags="-O0 -g3 -fno-omit-frame-pointer"
+              --extra-ldflags=""
+            make_targets: "ffmpeg ffprobe"
+
+          - name: asan-ubsan
+            configure_flags: >-
+              --disable-stripping
+              --enable-debug=3
+              --disable-optimizations
+              --toolchain=clang-asan
+              --extra-cflags="-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
+              --extra-ldflags="-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            make_targets: "ffmpeg ffprobe tests/videogen"
+
+          - name: ubsan-strict
+            configure_flags: >-
+              --disable-stripping
+              --enable-debug=3
+              --disable-optimizations
+              --cc=clang
+              --cxx=clang++
+              --extra-cflags="-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer -fno-sanitize-recover=all"
+              --extra-ldflags="-fsanitize=undefined,signed-integer-overflow,float-cast-overflow,integer"
+            make_targets: "ffmpeg ffprobe tests/videogen"
+
+          - name: shared-dev
+            configure_flags: >-
+              --disable-stripping
+              --enable-shared
+              --disable-static
+              --enable-debug=2
+              --extra-cflags="-O1 -g3 -fno-omit-frame-pointer"
+              --extra-ldflags=""
+            make_targets: "ffmpeg ffprobe"
+
+          - name: fate-tools-asan
+            configure_flags: >-
+              --disable-stripping
+              --enable-debug=3
+              --disable-optimizations
+              --toolchain=clang-asan
+              --extra-cflags="-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
+              --extra-ldflags="-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            make_targets: "tests/videogen tools/target_dem_fuzzer ffmpeg ffprobe"
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git build-essential clang lld pkg-config yasm nasm \
+            zlib1g-dev libssl-dev libxml2-dev zip curl python3
+
+      - name: Clone FFmpeg
+        run: |
+          git clone https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          cd ffmpeg
+          git checkout "${{ github.event.inputs.ffmpeg_ref }}"
+          git rev-parse HEAD | tee ../FFMPEG_COMMIT.txt
+
+      - name: Configure FFmpeg
+        working-directory: ffmpeg
+        run: |
+          ./configure \
+            --prefix="$PWD/../out/${{ matrix.name }}" \
+            ${{ matrix.configure_flags }}
+
+      - name: Build FFmpeg
+        working-directory: ffmpeg
+        run: |
+          make -j"$(nproc)" ${{ matrix.make_targets }}
+          make install || true
+
+      - name: Collect build files
+        run: |
+          mkdir -p "package/${{ matrix.name }}/bin"
+          mkdir -p "package/${{ matrix.name }}/lib"
+          mkdir -p "package/${{ matrix.name }}/include"
+          mkdir -p "package/${{ matrix.name }}/build-info"
+
+          cp ffmpeg/ffmpeg "package/${{ matrix.name }}/bin/" || true
+          cp ffmpeg/ffprobe "package/${{ matrix.name }}/bin/" || true
+          cp ffmpeg/tests/videogen "package/${{ matrix.name }}/bin/" || true
+          cp ffmpeg/tools/target_dem_fuzzer "package/${{ matrix.name }}/bin/" || true
+
+          cp -a "out/${{ matrix.name }}/lib/"* "package/${{ matrix.name }}/lib/" 2>/dev/null || true
+          cp -a "out/${{ matrix.name }}/include/"* "package/${{ matrix.name }}/include/" 2>/dev/null || true
+
+          cp ffmpeg/config.log "package/${{ matrix.name }}/build-info/config.log"
+          cp ffmpeg/config.h "package/${{ matrix.name }}/build-info/config.h"
+          cp ffmpeg/ffbuild/config.mak "package/${{ matrix.name }}/build-info/config.mak"
+          cp FFMPEG_COMMIT.txt "package/${{ matrix.name }}/build-info/FFMPEG_COMMIT.txt"
+
+          cat > "package/${{ matrix.name }}/RUN_ENV.sh" <<'EOF'
+          #!/usr/bin/env bash
+          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          export LD_LIBRARY_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib:${LD_LIBRARY_PATH:-}"
+          EOF
+          chmod +x "package/${{ matrix.name }}/RUN_ENV.sh"
+
+      - name: Zip build
+        run: |
+          cd package
+          zip -r "../ffmpeg-${{ matrix.name }}-x64-linux.zip" "${{ matrix.name }}"
+          cd ..
+          sha256sum "ffmpeg-${{ matrix.name }}-x64-linux.zip" | tee "ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256"
+
+      - name: Upload to sendit.sh
+        run: |
+          echo "Uploading ffmpeg-${{ matrix.name }}-x64-linux.zip"
+          LINK="$(curl -sS https://sendit.sh -T "ffmpeg-${{ matrix.name }}-x64-linux.zip")"
+          echo "Download link for ${{ matrix.name }}:"
+          echo "$LINK"
+          echo "$LINK" > "ffmpeg-${{ matrix.name }}-sendit-link.txt"
+
+      - name: Upload GitHub artifact backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.name }}-x64-linux
+          path: |
+            ffmpeg-${{ matrix.name }}-x64-linux.zip
+            ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256
+            ffmpeg-${{ matrix.name }}-sendit-link.txt
