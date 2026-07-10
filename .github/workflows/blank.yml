@@ -120,11 +120,11 @@ jobs:
       BUILD_ID: ${{ matrix.id }}
       V8_REVISION: ${{ needs.resolve-sources.outputs.v8_revision }}
       V8_SHORT_REVISION: ${{ needs.resolve-sources.outputs.v8_short_revision }}
-      DEPOT_TOOLS: ${{ runner.temp }}/depot_tools
-      CHECKOUT_ROOT: ${{ runner.temp }}/v8-checkout
-      V8_DIR: ${{ runner.temp }}/v8-checkout/v8
-      OUT_DIR: ${{ runner.temp }}/v8-checkout/v8/out/security-build
-      PACKAGE_ROOT: ${{ runner.temp }}/v8-package
+      DEPOT_TOOLS: ${{ github.workspace }}/.ci/depot_tools
+      CHECKOUT_ROOT: ${{ github.workspace }}/.ci/v8-checkout
+      V8_DIR: ${{ github.workspace }}/.ci/v8-checkout/v8
+      OUT_DIR: ${{ github.workspace }}/.ci/v8-checkout/v8/out/security-build
+      PACKAGE_ROOT: ${{ github.workspace }}/.ci/v8-package
 
     steps:
       - name: Show resources and reclaim disk
@@ -526,11 +526,11 @@ jobs:
     env:
       CHROMIUM_REVISION: ${{ needs.resolve-sources.outputs.chromium_revision }}
       CHROMIUM_SHORT_REVISION: ${{ needs.resolve-sources.outputs.chromium_short_revision }}
-      DEPOT_TOOLS: ${{ runner.temp }}/depot_tools
-      CHECKOUT_ROOT: ${{ runner.temp }}/chromium-checkout
-      CHROMIUM_DIR: ${{ runner.temp }}/chromium-checkout/src
-      OUT_DIR: ${{ runner.temp }}/chromium-checkout/src/out/security-chrome
-      PACKAGE_ROOT: ${{ runner.temp }}/chromium-package
+      DEPOT_TOOLS: ${{ github.workspace }}/.ci/depot_tools
+      CHECKOUT_ROOT: ${{ github.workspace }}/.ci/chromium-checkout
+      CHROMIUM_DIR: ${{ github.workspace }}/.ci/chromium-checkout/src
+      OUT_DIR: ${{ github.workspace }}/.ci/chromium-checkout/src/out/security-chrome
+      PACKAGE_ROOT: ${{ github.workspace }}/.ci/chromium-package
 
     steps:
       - name: Show resources and reclaim disk aggressively
