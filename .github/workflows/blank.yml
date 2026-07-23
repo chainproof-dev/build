@@ -207,6 +207,7 @@ jobs:
 
           # Ensure source hooks have installed GN, Clang, Ninja and other tools.
           gclient runhooks
+          find third_party/llvm-build/Release+Asserts/lib/clang -name "libclang_rt.builtins.a"
           test -x "$GN_BIN"
           "$GN_BIN" --version
           df -h
@@ -218,7 +219,7 @@ jobs:
           export PATH="$DEPOT_TOOLS:$PATH"
           cd "$V8_DIR"
           sudo env DEBIAN_FRONTEND=noninteractive ./build/install-build-deps.sh --no-prompt
-          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
+          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=loongarch64
 
       - name: Generate and validate args.gn
         shell: bash
