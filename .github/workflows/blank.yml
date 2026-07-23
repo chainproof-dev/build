@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: v8-x64-security-${{ github.repository }}-${{ github.ref }}
+  group: v8-loong64-security-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -99,13 +99,13 @@ jobs:
       matrix:
         include:
           - order: "01"
-            id: x64-sandbox-release
+            id: loong64-sandbox-release
           - order: "02"
-            id: x64-sandbox-asan
+            id: loong64-sandbox-asan
           - order: "03"
-            id: x64-release
+            id: loong64-release
           - order: "04"
-            id: x64-asan
+            id: loong64-asan
 
     env:
       BUILD_ID: ${{ matrix.id }}
@@ -230,7 +230,7 @@ jobs:
 
           cat > "$OUT_DIR/args.gn" <<'EOF'
           target_os = "linux"
-          target_cpu = "x64"
+          target_cpu = "loong64"
           is_official_build = false
           is_component_build = false
           is_clang = true
@@ -241,7 +241,7 @@ jobs:
           sed -i 's/^          //' "$OUT_DIR/args.gn"
 
           case "$BUILD_ID" in
-            x64-release)
+            loong64-release)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = false
@@ -251,7 +251,7 @@ jobs:
           EOF
               ;;
 
-            x64-asan)
+            loong64-asan)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = false
@@ -263,7 +263,7 @@ jobs:
           EOF
               ;;
 
-            x64-checks)
+            loong64-checks)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = true
@@ -282,7 +282,7 @@ jobs:
           EOF
               ;;
 
-            x64-full-debug)
+            loong64-full-debug)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = true
           v8_optimized_debug = false
@@ -297,7 +297,7 @@ jobs:
           EOF
               ;;
 
-            x64-ubsan)
+            loong64-ubsan)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = false
@@ -310,7 +310,7 @@ jobs:
           EOF
               ;;
 
-            x64-tsan)
+            loong64-tsan)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = false
@@ -321,7 +321,7 @@ jobs:
           EOF
               ;;
 
-            x64-fuzzilli)
+            loong64-fuzzilli)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = true
@@ -336,7 +336,7 @@ jobs:
           EOF
               ;;
 
-            x64-sandbox-release)
+            loong64-sandbox-release)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = false
@@ -346,7 +346,7 @@ jobs:
           EOF
               ;;
 
-            x64-sandbox-asan)
+            loong64-sandbox-asan)
               cat >> "$OUT_DIR/args.gn" <<'EOF'
           is_debug = false
           dcheck_always_on = false
@@ -393,13 +393,13 @@ jobs:
 
           cat > "$RUNNER_TEMP/v8-smoke.js" <<'JS'
           print("V8 version: " + version());
-          print("x64 smoke test passed");
+          print("loong64 smoke test passed");
           JS
 
           "$OUT_DIR/d8" "$RUNNER_TEMP/v8-smoke.js"
           "$OUT_DIR/d8" --run-as-security-poc "$RUNNER_TEMP/v8-smoke.js"
 
-          if [[ "$BUILD_ID" == x64-sandbox-* ]]; then
+          if [[ "$BUILD_ID" == loong64-sandbox-* ]]; then
             cat > "$RUNNER_TEMP/v8-sandbox-smoke.js" <<'JS'
           if (typeof Sandbox !== "object") {
             throw new Error("Sandbox memory-corruption API was not exposed");
@@ -439,7 +439,7 @@ jobs:
             echo "build_id=$BUILD_ID"
             echo "v8_revision=$V8_REVISION"
             echo "target_os=linux"
-            echo "target_cpu=x64"
+            echo "target_cpu=loong64"
             echo "runner=$RUNNER_NAME"
             echo "runner_arch=$RUNNER_ARCH"
             echo "nproc=$(nproc)"
@@ -521,7 +521,7 @@ jobs:
           compression-level: 0
 
   build-chromium:
-    name: 10 · chromium-x64-optimized
+    name: 10 · chromium-loong64-optimized
     needs: [resolve-sources, build-v8]
     runs-on: ${{ inputs.chromium_runner_label }}
     timeout-minutes: 360
@@ -649,7 +649,7 @@ jobs:
 
           cat > "$OUT_DIR/args.gn" <<'EOF'
           target_os = "linux"
-          target_cpu = "x64"
+          target_cpu = "loong64"
           is_debug = false
           dcheck_always_on = false
           is_official_build = false
@@ -780,7 +780,7 @@ jobs:
             echo "chromium_revision=$CHROMIUM_REVISION"
             echo "chromium_v8_revision=$chromium_v8_revision"
             echo "target_os=linux"
-            echo "target_cpu=x64"
+            echo "target_cpu=loong64"
             echo "is_component_build=true"
             echo "runner=$RUNNER_NAME"
             echo "runner_arch=$RUNNER_ARCH"
@@ -835,7 +835,7 @@ jobs:
           echo "link_file=$link_file" >> "$GITHUB_OUTPUT"
 
           {
-            echo "## chromium-x64-optimized"
+            echo "## chromium-loong64-optimized"
             echo
             echo "- Chromium revision: \`$CHROMIUM_REVISION\`"
             echo "- Chromium-pinned V8: \`${{ steps.package.outputs.chromium_v8_revision }}\`"
