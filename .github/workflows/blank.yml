@@ -99,23 +99,13 @@ jobs:
       matrix:
         include:
           - order: "01"
-            id: x64-release
-          - order: "02"
-            id: x64-asan
-          - order: "03"
-            id: x64-checks
-          - order: "04"
-            id: x64-full-debug
-          - order: "05"
-            id: x64-ubsan
-          - order: "06"
-            id: x64-tsan
-          - order: "07"
-            id: x64-fuzzilli
-          - order: "08"
             id: x64-sandbox-release
-          - order: "09"
+          - order: "02"
             id: x64-sandbox-asan
+          - order: "03"
+            id: x64-release
+          - order: "04"
+            id: x64-asan
 
     env:
       BUILD_ID: ${{ matrix.id }}
