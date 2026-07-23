@@ -219,7 +219,7 @@ jobs:
           export PATH="$DEPOT_TOOLS:$PATH"
           cd "$V8_DIR"
           sudo env DEBIAN_FRONTEND=noninteractive ./build/install-build-deps.sh --no-prompt
-          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=loongarch64
+          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
 
       - name: Generate and validate args.gn
         shell: bash
