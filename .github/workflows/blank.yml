@@ -20,22 +20,15 @@ jobs:
         include:
           - name: release
             artifact: redis-release
-            cflags: "-O2 -g"
-            ldflags: ""
 
           - name: asan-lsan
             artifact: redis-asan-lsan
-            cflags: "-O1 -g -fno-omit-frame-pointer -fsanitize=address"
-            ldflags: "-fsanitize=address"
 
           - name: asan-ubsan
             artifact: redis-asan-ubsan
-            cflags: "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
-            ldflags: "-fsanitize=address,undefined"
 
     steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
@@ -54,14 +47,11 @@ jobs:
             tcl \
             wget \
             curl \
-            ca-certificates \
             zip \
             unzip \
-            tar \
             python3 \
             python3-pip \
             libssl-dev \
-            libsystemd-dev \
             libc6-dev
 
       - name: Show compiler versions
@@ -72,26 +62,63 @@ jobs:
 
       - name: Clone latest Redis
         run: |
-          git clone https://github.com/redis/redis.git redis-src
+          git clone --depth=1 --branch unstable https://github.com/redis/redis.git redis-src
           cd redis-src
-          git checkout unstable
-
           echo "Commit:"
           git rev-parse HEAD
 
       - name: Clean source tree
         working-directory: redis-src
         run: |
+          git clean -xfd
           make distclean || true
 
       - name: Build Redis
         working-directory: redis-src
         env:
           CC: clang
-          CFLAGS: ${{ matrix.cflags }}
-          LDFLAGS: ${{ matrix.ldflags }}
         run: |
-          make -j$(nproc)
+          set -euxo pipefail
+
+          make distclean || true
+
+          if [ "${{ matrix.name }}" = "release" ]; then
+
+            make -j"$(nproc)" \
+              MALLOC=libc \
+              BUILD_TLS=yes \
+              USE_SYSTEMD=no \
+              OPTIMIZATION="-O2"
+
+            BUILD_FLAGS="Release"
+
+          elif [ "${{ matrix.name }}" = "asan-lsan" ]; then
+
+            make -j"$(nproc)" \
+              MALLOC=libc \
+              BUILD_TLS=yes \
+              USE_SYSTEMD=no \
+              OPTIMIZATION="-O1" \
+              CFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address" \
+              LDFLAGS="-fsanitize=address"
+
+            BUILD_FLAGS="ASan + LeakSanitizer"
+
+          else
+
+            make -j"$(nproc)" \
+              MALLOC=libc \
+              BUILD_TLS=yes \
+              USE_SYSTEMD=no \
+              OPTIMIZATION="-O1" \
+              CFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+              LDFLAGS="-fsanitize=address,undefined"
+
+            BUILD_FLAGS="ASan + UBSan"
+
+          fi
+
+          echo "$BUILD_FLAGS" > ../build_flags.txt
 
       - name: Verify binaries
         working-directory: redis-src/src
@@ -114,7 +141,8 @@ jobs:
           cat > package/BUILD_INFO.txt <<EOF
           Redis Build
 
-          Configuration : ${{ matrix.name }}
+          Configuration:
+          $(cat build_flags.txt)
 
           Commit:
           $(cd redis-src && git rev-parse HEAD)
@@ -124,17 +152,12 @@ jobs:
 
           Compiler:
           $(clang --version | head -n1)
-
-          CFLAGS:
-          ${{ matrix.cflags }}
-
-          LDFLAGS:
-          ${{ matrix.ldflags }}
           EOF
 
       - name: Archive build
         run: |
-          zip -r "${{ matrix.artifact }}.zip" package
+          cd package
+          zip -9 -r ../${{ matrix.artifact }}.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
