@@ -28,7 +28,8 @@ jobs:
             artifact: redis-asan-ubsan
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
@@ -63,7 +64,9 @@ jobs:
       - name: Clone latest Redis
         run: |
           git clone --depth=1 --branch unstable https://github.com/redis/redis.git redis-src
+
           cd redis-src
+
           echo "Commit:"
           git rev-parse HEAD
 
@@ -131,12 +134,13 @@ jobs:
 
       - name: Prepare package
         run: |
-          mkdir package
+          mkdir -p package
 
-          cp -a redis-src/src package/src
-          cp -a redis-src/redis.conf package/
-          cp -a redis-src/sentinel.conf package/
-          cp -a redis-src/COPYING package/
+          cp -a redis-src package/source
+
+          rm -rf \
+            package/source/.git \
+            package/source/.github
 
           cat > package/BUILD_INFO.txt <<EOF
           Redis Build
