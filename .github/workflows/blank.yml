@@ -1,172 +1,373 @@
-name: Build Redis (Release + Sanitizers)
+name: Build FFmpeg Security Runtimes
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-
-permissions:
-  contents: read
+    inputs:
+      ffmpeg_ref:
+        description: "FFmpeg git ref, branch, tag, or commit"
+        required: false
+        default: "master"
 
 jobs:
   build:
-    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     strategy:
+      max-parallel: 1
       fail-fast: false
       matrix:
         include:
           - name: release
-            artifact: redis-release
+            cc: gcc
+            cxx: g++
+            configure_extra: "--disable-stripping --enable-debug=2"
+            cflags: "-O2 -g -fno-omit-frame-pointer"
+            ldflags: ""
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: ""
 
-          - name: asan-lsan
-            artifact: redis-asan-lsan
+          - name: debug
+            cc: gcc
+            cxx: g++
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations"
+            cflags: "-O0 -g3 -fno-omit-frame-pointer"
+            ldflags: ""
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: ""
 
           - name: asan-ubsan
-            artifact: redis-asan-ubsan
+            cc: clang
+            cxx: clang++
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
+            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: "tests/videogen tools/target_dem_fuzzer"
+
+          - name: ubsan-strict
+            cc: clang
+            cxx: clang++
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --cc=clang --cxx=clang++"
+            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
+            ldflags: "-fsanitize=undefined,signed-integer-overflow,float-cast-overflow"
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: "tests/videogen"
+
+          - name: shared-dev
+            cc: gcc
+            cxx: g++
+            configure_extra: "--disable-stripping --enable-shared --disable-static --enable-debug=2"
+            cflags: "-O1 -g3 -fno-omit-frame-pointer"
+            ldflags: ""
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: ""
+
+          - name: fate-tools-asan
+            cc: clang
+            cxx: clang++
+            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
+            cflags: "-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
+            essential_targets: "ffmpeg ffprobe"
+            optional_targets: "tests/videogen tools/target_dem_fuzzer"
 
     steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v4
-
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            build-essential \
-            clang \
-            llvm \
-            lld \
-            git \
-            make \
-            cmake \
-            ninja-build \
-            pkg-config \
-            tcl \
-            wget \
-            curl \
-            zip \
-            unzip \
-            python3 \
-            python3-pip \
-            libssl-dev \
-            libc6-dev
-
-      - name: Show compiler versions
-        run: |
-          clang --version
-          gcc --version
-          make --version
-
-      - name: Clone latest Redis
-        run: |
-          git clone --depth=1 --branch unstable https://github.com/redis/redis.git redis-src
-
-          cd redis-src
-
-          echo "Commit:"
-          git rev-parse HEAD
-
-      - name: Clean source tree
-        working-directory: redis-src
-        run: |
-          git clean -xfd
-          make distclean || true
-
-      - name: Build Redis
-        working-directory: redis-src
-        env:
-          CC: clang
+        shell: bash
         run: |
           set -euxo pipefail
 
-          make distclean || true
+          sudo apt-get update
+          sudo apt-get install -y \
+            git build-essential clang lld pkg-config yasm nasm \
+            zlib1g-dev libssl-dev libxml2-dev zip curl python3 ca-certificates \
+            file xz-utils
 
-          if [ "${{ matrix.name }}" = "release" ]; then
+      - name: Clone FFmpeg
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-            make -j"$(nproc)" \
-              MALLOC=libc \
-              BUILD_TLS=yes \
-              USE_SYSTEMD=no \
-              OPTIMIZATION="-O2"
+          git clone https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          cd ffmpeg
+          git checkout "${{ github.event.inputs.ffmpeg_ref }}"
+          git rev-parse HEAD | tee ../FFMPEG_COMMIT.txt
+          git status --short
 
-            BUILD_FLAGS="Release"
+      - name: Configure FFmpeg
+        shell: bash
+        working-directory: ffmpeg
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          CONFIGURE_EXTRA: ${{ matrix.configure_extra }}
+          CFLAGS_EXTRA: ${{ matrix.cflags }}
+          LDFLAGS_EXTRA: ${{ matrix.ldflags }}
+        run: |
+          set -euxo pipefail
 
-          elif [ "${{ matrix.name }}" = "asan-lsan" ]; then
+          mkdir -p "../out/${{ matrix.name }}"
 
-            make -j"$(nproc)" \
-              MALLOC=libc \
-              BUILD_TLS=yes \
-              USE_SYSTEMD=no \
-              OPTIMIZATION="-O1" \
-              CFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address" \
-              LDFLAGS="-fsanitize=address"
+          read -r -a CFG_ARGS <<< "$CONFIGURE_EXTRA"
 
-            BUILD_FLAGS="ASan + LeakSanitizer"
+          CMD=(
+            ./configure
+            --prefix="$PWD/../out/${{ matrix.name }}"
+            "${CFG_ARGS[@]}"
+            --extra-cflags="$CFLAGS_EXTRA"
+          )
 
-          else
-
-            make -j"$(nproc)" \
-              MALLOC=libc \
-              BUILD_TLS=yes \
-              USE_SYSTEMD=no \
-              OPTIMIZATION="-O1" \
-              CFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined" \
-              LDFLAGS="-fsanitize=address,undefined"
-
-            BUILD_FLAGS="ASan + UBSan"
-
+          if [ -n "$LDFLAGS_EXTRA" ]; then
+            CMD+=(--extra-ldflags="$LDFLAGS_EXTRA")
           fi
 
-          echo "$BUILD_FLAGS" > ../build_flags.txt
+          echo "[+] Configure command:"
+          printf ' %q' "${CMD[@]}"
+          printf '\n'
 
-      - name: Verify binaries
-        working-directory: redis-src/src
+          "${CMD[@]}"
+
+      - name: Build essential targets
+        shell: bash
+        working-directory: ffmpeg
         run: |
-          file redis-server
-          file redis-cli
+          set -euxo pipefail
 
-          ./redis-server --version
-          ./redis-cli --version
+          echo "[+] Building essential targets: ${{ matrix.essential_targets }}"
 
-      - name: Prepare package
+          for target in ${{ matrix.essential_targets }}; do
+            echo "[+] make $target"
+            make -j"$(nproc)" "$target"
+          done
+
+      - name: Build optional targets
+        shell: bash
+        working-directory: ffmpeg
         run: |
-          mkdir -p package
+          set -uxo pipefail
 
-          cp -a redis-src package/source
+          echo "[+] Optional targets: ${{ matrix.optional_targets }}"
 
-          rm -rf \
-            package/source/.git \
-            package/source/.github
+          for target in ${{ matrix.optional_targets }}; do
+            echo "[+] Trying optional target: $target"
+            if make -j"$(nproc)" "$target"; then
+              echo "[OK] Built optional target: $target"
+            else
+              echo "[WARN] Optional target failed or does not exist: $target"
+            fi
+          done
 
-          cat > package/BUILD_INFO.txt <<EOF
-          Redis Build
+          if echo "${{ matrix.optional_targets }}" | grep -q "tests/videogen"; then
+            if [ ! -x tests/videogen ]; then
+              echo "[WARN] tests/videogen missing. Trying manual fallback compile."
 
-          Configuration:
-          $(cat build_flags.txt)
+              if echo "${{ matrix.name }}" | grep -Eq "asan|ubsan"; then
+                ${{ matrix.cc }} \
+                  -O0 -g3 -fno-omit-frame-pointer \
+                  -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow \
+                  -I. -I./ \
+                  -o tests/videogen \
+                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
+              else
+                ${{ matrix.cc }} \
+                  -O0 -g3 -fno-omit-frame-pointer \
+                  -I. -I./ \
+                  -o tests/videogen \
+                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
+              fi
+            fi
+          fi
 
-          Commit:
-          $(cd redis-src && git rev-parse HEAD)
+      - name: Install FFmpeg
+        shell: bash
+        working-directory: ffmpeg
+        run: |
+          set -uxo pipefail
 
-          Date:
-          $(date -u)
+          echo "[+] Running make install"
+          if make install; then
+            echo "[OK] make install succeeded"
+          else
+            echo "[WARN] make install failed. Packaging will continue from build tree."
+          fi
 
-          Compiler:
-          $(clang --version | head -n1)
+      - name: Collect build files safely
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PKG="package/${{ matrix.name }}"
+          PREFIX="$PWD/out/${{ matrix.name }}"
+
+          mkdir -p "$PKG/bin" "$PKG/lib" "$PKG/include" "$PKG/build-info" "$PKG/src-snippets"
+
+          copy_if_exists() {
+            SRC="$1"
+            DST="$2"
+
+            if [ -e "$SRC" ]; then
+              cp -a "$SRC" "$DST"
+              echo "[copy] $SRC -> $DST"
+            else
+              echo "[skip] missing: $SRC"
+            fi
+          }
+
+          copy_dir_if_exists() {
+            SRC="$1"
+            DST="$2"
+
+            if [ -d "$SRC" ]; then
+              mkdir -p "$DST"
+              cp -a "$SRC/." "$DST/" || true
+              echo "[copy-dir] $SRC -> $DST"
+            else
+              echo "[skip-dir] missing: $SRC"
+            fi
+          }
+
+          copy_if_exists "ffmpeg/ffmpeg" "$PKG/bin/"
+          copy_if_exists "ffmpeg/ffprobe" "$PKG/bin/"
+          copy_if_exists "ffmpeg/ffplay" "$PKG/bin/"
+          copy_if_exists "ffmpeg/tests/videogen" "$PKG/bin/"
+          copy_if_exists "ffmpeg/tools/target_dem_fuzzer" "$PKG/bin/"
+
+          copy_if_exists "$PREFIX/bin/ffmpeg" "$PKG/bin/"
+          copy_if_exists "$PREFIX/bin/ffprobe" "$PKG/bin/"
+          copy_if_exists "$PREFIX/bin/ffplay" "$PKG/bin/"
+
+          copy_dir_if_exists "$PREFIX/lib" "$PKG/lib"
+          copy_dir_if_exists "$PREFIX/include" "$PKG/include"
+
+          for lib in \
+            ffmpeg/libavutil/libavutil.a \
+            ffmpeg/libavcodec/libavcodec.a \
+            ffmpeg/libavformat/libavformat.a \
+            ffmpeg/libavdevice/libavdevice.a \
+            ffmpeg/libavfilter/libavfilter.a \
+            ffmpeg/libswscale/libswscale.a \
+            ffmpeg/libswresample/libswresample.a
+          do
+            copy_if_exists "$lib" "$PKG/lib/"
+          done
+
+          copy_if_exists "ffmpeg/config.h" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/config.log" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/ffbuild/config.log" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/ffbuild/config.mak" "$PKG/build-info/"
+          copy_if_exists "ffmpeg/ffbuild/config.sh" "$PKG/build-info/"
+          copy_if_exists "FFMPEG_COMMIT.txt" "$PKG/build-info/"
+
+          for src in \
+            ffmpeg/libavformat/http.c \
+            ffmpeg/libavformat/rtsp.c \
+            ffmpeg/libavformat/mov.c \
+            ffmpeg/libavformat/concatdec.c \
+            ffmpeg/libavformat/id3v2.c \
+            ffmpeg/libavformat/omadec.c \
+            ffmpeg/libavformat/matroskadec.c \
+            ffmpeg/libavutil/rc4.c \
+            ffmpeg/libavutil/blowfish.c \
+            ffmpeg/libavutil/aes_ctr.c \
+            ffmpeg/tests/videogen.c \
+            ffmpeg/tests/utils.c
+          do
+            copy_if_exists "$src" "$PKG/src-snippets/"
+          done
+
+          cat > "$PKG/RUN_ENV.sh" <<'EOF'
+          #!/usr/bin/env bash
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"
+          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1:allocator_may_return_null=1
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          export PATH="$HERE/bin:$PATH"
           EOF
 
-      - name: Archive build
-        run: |
-          cd package
-          zip -9 -r ../${{ matrix.artifact }}.zip .
+          chmod +x "$PKG/RUN_ENV.sh"
 
-      - name: Upload artifact
+          cat > "$PKG/README_RUN.txt" <<EOF
+          Build: ${{ matrix.name }}
+          Commit: $(cat FFMPEG_COMMIT.txt 2>/dev/null || echo unknown)
+
+          Usage:
+            cd ${{ matrix.name }}
+            source ./RUN_ENV.sh
+            ./bin/ffmpeg -version
+            ./bin/ffprobe -version
+
+          Common tests:
+            ./bin/ffprobe -v trace poc.oma
+            ./bin/ffprobe -v trace matroska_nan.mkv
+            ./bin/ffprobe -v error cmov_oom.mp4
+            ./bin/videogen /tmp/out.yuv 65536 65536
+          EOF
+
+          echo "[+] Packaged files:"
+          find "$PKG" -maxdepth 4 -type f | sort
+
+          echo "[+] Binary file info:"
+          find "$PKG/bin" -maxdepth 1 -type f -exec file {} \; || true
+
+      - name: Zip build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
+
+          cd package
+          zip -r "../$ZIP" "${{ matrix.name }}"
+          cd ..
+
+          sha256sum "$ZIP" | tee "$ZIP.sha256"
+          ls -lh "$ZIP" "$ZIP.sha256"
+
+      - name: Upload to sendit.sh
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uxo pipefail
+
+          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
+          LINK_FILE="ffmpeg-${{ matrix.name }}-sendit-link.txt"
+
+          echo "[+] Uploading $ZIP to sendit.sh"
+
+          LINK=""
+
+          for i in 1 2 3 4 5; do
+            echo "[+] Upload attempt $i"
+
+            LINK="$(curl -fsS --retry 3 --retry-all-errors -T "$ZIP" https://sendit.sh || true)"
+
+            if echo "$LINK" | grep -Eiq 'https?://'; then
+              echo "[OK] Upload succeeded"
+              break
+            fi
+
+            echo "[WARN] Upload failed or no link returned. Response:"
+            echo "$LINK"
+            sleep 10
+          done
+
+          if ! echo "$LINK" | grep -Eiq 'https?://'; then
+            echo "[WARN] sendit upload failed after retries"
+            LINK="SENDIT_UPLOAD_FAILED_USE_GITHUB_ARTIFACT"
+          fi
+
+          echo "Download link for ${{ matrix.name }}:"
+          echo "$LINK"
+          echo "$LINK" > "$LINK_FILE"
+
+      - name: Upload GitHub artifact backup
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          name: ffmpeg-${{ matrix.name }}-x64-linux
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
+          path: |
+            ffmpeg-${{ matrix.name }}-x64-linux.zip
+            ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256
+            ffmpeg-${{ matrix.name }}-sendit-link.txt
