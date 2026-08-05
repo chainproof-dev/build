@@ -1,4 +1,4 @@
-name: Build FFmpeg Security Runtimes
+name: Build FFmpeg MSan Runtime
 
 on:
   workflow_dispatch:
@@ -9,68 +9,21 @@ on:
         default: "master"
 
 jobs:
-  build:
+  build-msan:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
-    strategy:
-      max-parallel: 1
-      fail-fast: false
-      matrix:
-        include:
-          - name: release
-            cc: gcc
-            cxx: g++
-            configure_extra: "--disable-stripping --enable-debug=2"
-            cflags: "-O2 -g -fno-omit-frame-pointer"
-            ldflags: ""
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: ""
-
-          - name: debug
-            cc: gcc
-            cxx: g++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations"
-            cflags: "-O0 -g3 -fno-omit-frame-pointer"
-            ldflags: ""
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: ""
-
-          - name: asan-ubsan
-            cc: clang
-            cxx: clang++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
-            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: "tests/videogen tools/target_dem_fuzzer"
-
-          - name: ubsan-strict
-            cc: clang
-            cxx: clang++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --cc=clang --cxx=clang++"
-            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
-            ldflags: "-fsanitize=undefined,signed-integer-overflow,float-cast-overflow"
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: "tests/videogen"
-
-          - name: shared-dev
-            cc: gcc
-            cxx: g++
-            configure_extra: "--disable-stripping --enable-shared --disable-static --enable-debug=2"
-            cflags: "-O1 -g3 -fno-omit-frame-pointer"
-            ldflags: ""
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: ""
-
-          - name: fate-tools-asan
-            cc: clang
-            cxx: clang++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
-            cflags: "-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: "tests/videogen tools/target_dem_fuzzer"
+    env:
+      BUILD_NAME: msan
+      CC: clang
+      CXX: clang++
+      CFLAGS_EXTRA: >-
+        -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+        -fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE
+      LDFLAGS_EXTRA: >-
+        -fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE -pie
+      ESSENTIAL_TARGETS: "ffmpeg ffprobe"
+      OPTIONAL_TARGETS: "tests/videogen tools/target_dem_fuzzer"
 
     steps:
       - name: Install dependencies
@@ -95,32 +48,28 @@ jobs:
           git rev-parse HEAD | tee ../FFMPEG_COMMIT.txt
           git status --short
 
-      - name: Configure FFmpeg
+      - name: Configure FFmpeg for MemorySanitizer
         shell: bash
         working-directory: ffmpeg
-        env:
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
-          CONFIGURE_EXTRA: ${{ matrix.configure_extra }}
-          CFLAGS_EXTRA: ${{ matrix.cflags }}
-          LDFLAGS_EXTRA: ${{ matrix.ldflags }}
         run: |
           set -euxo pipefail
 
-          mkdir -p "../out/${{ matrix.name }}"
-
-          read -r -a CFG_ARGS <<< "$CONFIGURE_EXTRA"
+          mkdir -p "../out/$BUILD_NAME"
 
           CMD=(
             ./configure
-            --prefix="$PWD/../out/${{ matrix.name }}"
-            "${CFG_ARGS[@]}"
+            --prefix="$PWD/../out/$BUILD_NAME"
+            --cc="$CC"
+            --cxx="$CXX"
+            --ld=clang
+            --disable-stripping
+            --enable-debug=3
+            --disable-optimizations
+            --disable-x86asm
             --extra-cflags="$CFLAGS_EXTRA"
+            --extra-cxxflags="$CFLAGS_EXTRA"
+            --extra-ldflags="$LDFLAGS_EXTRA"
           )
-
-          if [ -n "$LDFLAGS_EXTRA" ]; then
-            CMD+=(--extra-ldflags="$LDFLAGS_EXTRA")
-          fi
 
           echo "[+] Configure command:"
           printf ' %q' "${CMD[@]}"
@@ -134,9 +83,9 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "[+] Building essential targets: ${{ matrix.essential_targets }}"
+          echo "[+] Building essential targets: $ESSENTIAL_TARGETS"
 
-          for target in ${{ matrix.essential_targets }}; do
+          for target in $ESSENTIAL_TARGETS; do
             echo "[+] make $target"
             make -j"$(nproc)" "$target"
           done
@@ -147,9 +96,9 @@ jobs:
         run: |
           set -uxo pipefail
 
-          echo "[+] Optional targets: ${{ matrix.optional_targets }}"
+          echo "[+] Optional targets: $OPTIONAL_TARGETS"
 
-          for target in ${{ matrix.optional_targets }}; do
+          for target in $OPTIONAL_TARGETS; do
             echo "[+] Trying optional target: $target"
             if make -j"$(nproc)" "$target"; then
               echo "[OK] Built optional target: $target"
@@ -158,25 +107,15 @@ jobs:
             fi
           done
 
-          if echo "${{ matrix.optional_targets }}" | grep -q "tests/videogen"; then
-            if [ ! -x tests/videogen ]; then
-              echo "[WARN] tests/videogen missing. Trying manual fallback compile."
+          if [ ! -x tests/videogen ]; then
+            echo "[WARN] tests/videogen missing. Trying manual MSan fallback compile."
 
-              if echo "${{ matrix.name }}" | grep -Eq "asan|ubsan"; then
-                ${{ matrix.cc }} \
-                  -O0 -g3 -fno-omit-frame-pointer \
-                  -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow \
-                  -I. -I./ \
-                  -o tests/videogen \
-                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
-              else
-                ${{ matrix.cc }} \
-                  -O0 -g3 -fno-omit-frame-pointer \
-                  -I. -I./ \
-                  -o tests/videogen \
-                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
-              fi
-            fi
+            "$CC" \
+              $CFLAGS_EXTRA \
+              -I. -I./ \
+              -o tests/videogen \
+              tests/videogen.c -lm \
+              $LDFLAGS_EXTRA || echo "[WARN] manual videogen fallback failed"
           fi
 
       - name: Install FFmpeg
@@ -192,13 +131,31 @@ jobs:
             echo "[WARN] make install failed. Packaging will continue from build tree."
           fi
 
+      - name: Verify MSan instrumentation
+        shell: bash
+        working-directory: ffmpeg
+        run: |
+          set -euxo pipefail
+
+          strings ffmpeg | grep -q "MemorySanitizer" || {
+            echo "[ERROR] ffmpeg does not appear to contain the MSan runtime"
+            exit 1
+          }
+
+          strings ffprobe | grep -q "MemorySanitizer" || {
+            echo "[ERROR] ffprobe does not appear to contain the MSan runtime"
+            exit 1
+          }
+
+          echo "[OK] MSan runtime detected in ffmpeg and ffprobe"
+
       - name: Collect build files safely
         shell: bash
         run: |
           set -euxo pipefail
 
-          PKG="package/${{ matrix.name }}"
-          PREFIX="$PWD/out/${{ matrix.name }}"
+          PKG="package/$BUILD_NAME"
+          PREFIX="$PWD/out/$BUILD_NAME"
 
           mkdir -p "$PKG/bin" "$PKG/lib" "$PKG/include" "$PKG/build-info" "$PKG/src-snippets"
 
@@ -229,13 +186,11 @@ jobs:
 
           copy_if_exists "ffmpeg/ffmpeg" "$PKG/bin/"
           copy_if_exists "ffmpeg/ffprobe" "$PKG/bin/"
-          copy_if_exists "ffmpeg/ffplay" "$PKG/bin/"
           copy_if_exists "ffmpeg/tests/videogen" "$PKG/bin/"
           copy_if_exists "ffmpeg/tools/target_dem_fuzzer" "$PKG/bin/"
 
           copy_if_exists "$PREFIX/bin/ffmpeg" "$PKG/bin/"
           copy_if_exists "$PREFIX/bin/ffprobe" "$PKG/bin/"
-          copy_if_exists "$PREFIX/bin/ffplay" "$PKG/bin/"
 
           copy_dir_if_exists "$PREFIX/lib" "$PKG/lib"
           copy_dir_if_exists "$PREFIX/include" "$PKG/include"
@@ -260,6 +215,7 @@ jobs:
           copy_if_exists "FFMPEG_COMMIT.txt" "$PKG/build-info/"
 
           for src in \
+            ffmpeg/libavformat/webp_anim_dec.c \
             ffmpeg/libavformat/http.c \
             ffmpeg/libavformat/rtsp.c \
             ffmpeg/libavformat/mov.c \
@@ -276,33 +232,32 @@ jobs:
             copy_if_exists "$src" "$PKG/src-snippets/"
           done
 
-          cat > "$PKG/RUN_ENV.sh" <<'EOF'
+          cat > "$PKG/RUN_ENV.sh" <<'RUNEOF'
           #!/usr/bin/env bash
           HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"
-          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1:allocator_may_return_null=1
-          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          export MSAN_OPTIONS="halt_on_error=1:abort_on_error=1:exit_code=86:symbolize=1:print_stats=1:track_origins=2"
           export PATH="$HERE/bin:$PATH"
-          EOF
+          RUNEOF
 
           chmod +x "$PKG/RUN_ENV.sh"
 
-          cat > "$PKG/README_RUN.txt" <<EOF
-          Build: ${{ matrix.name }}
+          cat > "$PKG/README_RUN.txt" <<EOF2
+          Build: $BUILD_NAME
+          Sanitizer: Clang MemorySanitizer with origin tracking level 2
           Commit: $(cat FFMPEG_COMMIT.txt 2>/dev/null || echo unknown)
 
           Usage:
-            cd ${{ matrix.name }}
+            cd $BUILD_NAME
             source ./RUN_ENV.sh
             ./bin/ffmpeg -version
             ./bin/ffprobe -version
 
-          Common tests:
-            ./bin/ffprobe -v trace poc.oma
-            ./bin/ffprobe -v trace matroska_nan.mkv
-            ./bin/ffprobe -v error cmov_oom.mp4
-            ./bin/videogen /tmp/out.yuv 65536 65536
-          EOF
+          WebP test example:
+            ./bin/ffprobe -v trace crafted.webp
+
+          A MemorySanitizer finding exits with status 86.
+          EOF2
 
           echo "[+] Packaged files:"
           find "$PKG" -maxdepth 4 -type f | sort
@@ -315,10 +270,10 @@ jobs:
         run: |
           set -euxo pipefail
 
-          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
+          ZIP="ffmpeg-$BUILD_NAME-x64-linux.zip"
 
           cd package
-          zip -r "../$ZIP" "${{ matrix.name }}"
+          zip -r "../$ZIP" "$BUILD_NAME"
           cd ..
 
           sha256sum "$ZIP" | tee "$ZIP.sha256"
@@ -330,8 +285,8 @@ jobs:
         run: |
           set -uxo pipefail
 
-          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
-          LINK_FILE="ffmpeg-${{ matrix.name }}-sendit-link.txt"
+          ZIP="ffmpeg-$BUILD_NAME-x64-linux.zip"
+          LINK_FILE="ffmpeg-$BUILD_NAME-sendit-link.txt"
 
           echo "[+] Uploading $ZIP to sendit.sh"
 
@@ -357,17 +312,17 @@ jobs:
             LINK="SENDIT_UPLOAD_FAILED_USE_GITHUB_ARTIFACT"
           fi
 
-          echo "Download link for ${{ matrix.name }}:"
+          echo "Download link for $BUILD_NAME:"
           echo "$LINK"
           echo "$LINK" > "$LINK_FILE"
 
       - name: Upload GitHub artifact backup
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-${{ matrix.name }}-x64-linux
+          name: ffmpeg-msan-x64-linux
           if-no-files-found: error
           retention-days: 7
           path: |
-            ffmpeg-${{ matrix.name }}-x64-linux.zip
-            ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256
-            ffmpeg-${{ matrix.name }}-sendit-link.txt
+            ffmpeg-msan-x64-linux.zip
+            ffmpeg-msan-x64-linux.zip.sha256
+            ffmpeg-msan-sendit-link.txt
