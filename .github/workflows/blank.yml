@@ -1,409 +1,456 @@
-name: Build c-ares x64 security-research matrix
+name: Build c-ares Security Research Targets
 
 on:
   workflow_dispatch:
     inputs:
       cares_ref:
-        description: c-ares Git ref or exact 40-character commit SHA
-        required: true
-        default: refs/heads/main
-        type: string
-      runner_label:
-        description: Runner label for all builds
-        required: true
-        default: ubuntu-24.04
-        type: string
-      keep_github_backup:
-        description: Retain each build archive as a GitHub artifact for three days
-        required: true
-        default: false
+        description: "c-ares git ref, branch, tag, or commit"
+        required: false
+        default: "main"
+      run_tests:
+        description: "Run the c-ares test suite after building"
+        required: false
         type: boolean
+        default: true
 
 permissions:
   contents: read
 
-concurrency:
-  group: cares-x64-security-${{ github.repository }}-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  CARES_REMOTE: https://github.com/c-ares/c-ares.git
-
 jobs:
-  resolve-source:
-    name: Resolve exact source revision
+  build:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      cares_revision: ${{ steps.resolve.outputs.cares_revision }}
-      cares_short_revision: ${{ steps.resolve.outputs.cares_short_revision }}
-    steps:
-      - name: Resolve c-ares revision
-        id: resolve
-        shell: bash
-        env:
-          REQUESTED_CARES_REF: ${{ inputs.cares_ref }}
-        run: |
-          set -Eeuo pipefail
+    timeout-minutes: 180
 
-          if [[ "$REQUESTED_CARES_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            cares_revision="${REQUESTED_CARES_REF,,}"
-          else
-            cares_revision="$(git ls-remote "$CARES_REMOTE" "$REQUESTED_CARES_REF" | awk 'NR == 1 {print $1}')"
-          fi
-
-          if [[ ! "$cares_revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Could not resolve c-ares ref: $REQUESTED_CARES_REF" >&2
-            exit 1
-          fi
-
-          {
-            echo "cares_revision=$cares_revision"
-            echo "cares_short_revision=${cares_revision:0:12}"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## Resolved revision"
-            echo
-            echo "- All builds use c-ares: \`$cares_revision\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  build-cares:
-    name: ${{ matrix.order }} · ${{ matrix.id }}
-    needs: resolve-source
-    runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Fuzzing-oriented profiles (libFuzzer harness, corpus-driven coverage
-          # builds, OSS-Fuzz style instrumentation) are intentionally excluded
-          # from this matrix. Add a dedicated job if you need one later.
-          - order: "01"
-            id: x64-asan-ubsan
-          - order: "02"
-            id: x64-tsan
-          - order: "03"
-            id: x64-msan
-          - order: "04"
-            id: x64-debug-asserts
-          - order: "05"
-            id: x64-release-symbolized
+          - name: ASan + UBSan
+            id: asan-ubsan
+            build_type: Debug
+            c_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=address,undefined
+              -fno-sanitize-recover=all
+            cxx_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=address,undefined
+              -fno-sanitize-recover=all
+            linker_flags: >-
+              -fsanitize=address,undefined
+            runtime_env: >-
+              ASAN_OPTIONS=abort_on_error=1:halt_on_error=1:detect_leaks=1:strict_string_checks=1:check_initialization_order=1:symbolize=1
+              UBSAN_OPTIONS=abort_on_error=1:halt_on_error=1:print_stacktrace=1:symbolize=1
+            run_tests: true
+
+          - name: MemorySanitizer
+            id: msan
+            build_type: Debug
+            c_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=memory -fsanitize-memory-track-origins=2
+              -fPIE
+            cxx_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=memory -fsanitize-memory-track-origins=2
+              -fPIE
+            linker_flags: >-
+              -fsanitize=memory -fsanitize-memory-track-origins=2
+              -fPIE -pie
+            runtime_env: >-
+              MSAN_OPTIONS=abort_on_error=1:halt_on_error=1:exit_code=86:track_origins=2:symbolize=1:print_stats=1
+            # GTest/libstdc++ from Ubuntu are not MSan-instrumented. Build and package
+            # the targets, but do not execute them automatically to avoid false positives.
+            run_tests: false
+
+          - name: ThreadSanitizer
+            id: tsan
+            build_type: Debug
+            c_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=thread
+            cxx_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=thread
+            linker_flags: >-
+              -fsanitize=thread
+            runtime_env: >-
+              TSAN_OPTIONS=abort_on_error=1:halt_on_error=1:second_deadlock_stack=1:history_size=7:symbolize=1
+            run_tests: true
+
+          - name: Coverage
+            id: coverage
+            build_type: Debug
+            c_flags: >-
+              -O0 -g3 -fno-omit-frame-pointer
+              -fprofile-instr-generate -fcoverage-mapping
+            cxx_flags: >-
+              -O0 -g3 -fno-omit-frame-pointer
+              -fprofile-instr-generate -fcoverage-mapping
+            linker_flags: >-
+              -fprofile-instr-generate -fcoverage-mapping
+            runtime_env: >-
+              LLVM_PROFILE_FILE=cares-%p.profraw
+            run_tests: true
+
+          - name: Hardened RelWithDebInfo
+            id: hardened
+            build_type: RelWithDebInfo
+            c_flags: >-
+              -O2 -g3 -fno-omit-frame-pointer
+              -fstack-protector-strong -D_FORTIFY_SOURCE=3
+              -fPIE -Wformat -Wformat-security -Werror=format-security
+            cxx_flags: >-
+              -O2 -g3 -fno-omit-frame-pointer
+              -fstack-protector-strong -D_FORTIFY_SOURCE=3
+              -fPIE -Wformat -Wformat-security -Werror=format-security
+            linker_flags: >-
+              -fPIE -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
+            runtime_env: ""
+            run_tests: true
+
+          - name: Release Baseline
+            id: release
+            build_type: Release
+            c_flags: >-
+              -O2 -g1 -fno-omit-frame-pointer
+            cxx_flags: >-
+              -O2 -g1 -fno-omit-frame-pointer
+            linker_flags: ""
+            runtime_env: ""
+            run_tests: true
 
     env:
-      BUILD_ID: ${{ matrix.id }}
-      CARES_REVISION: ${{ needs.resolve-source.outputs.cares_revision }}
-      CARES_SHORT_REVISION: ${{ needs.resolve-source.outputs.cares_short_revision }}
-      SRC_DIR: ${{ github.workspace }}/.ci/c-ares
-      PACKAGE_ROOT: ${{ github.workspace }}/.ci/package
+      CC: clang
+      CXX: clang++
+      BUILD_DIR: build-${{ matrix.id }}
+      INSTALL_DIR: install-${{ matrix.id }}
+      PACKAGE_DIR: package/c-ares-${{ matrix.id }}
 
     steps:
-      - name: Show resources
+      - name: Install dependencies
         shell: bash
         run: |
-          set -Eeuo pipefail
-          uname -a
-          echo "Runner: $RUNNER_NAME"
-          echo "CPUs: $(nproc)"
-          free -h || true
-          df -h
+          set -euxo pipefail
 
-      - name: Install build toolchain
-        shell: bash
-        run: |
-          set -Eeuo pipefail
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates \
-            clang \
-            cmake \
-            file \
-            git \
-            libc++-dev \
-            libc++abi-dev \
-            llvm \
-            ninja-build \
-            pigz \
-            python3 \
-            valgrind
+          sudo apt-get install -y --no-install-recommends \
+            git build-essential clang llvm lld cmake ninja-build \
+            pkg-config libc-ares-dev libgtest-dev libgmock-dev googletest \
+            python3 zip file ca-certificates
 
-      - name: Clone c-ares at exact revision
+          clang --version
+          cmake --version
+          ninja --version
+          llvm-symbolizer --version
+
+      - name: Build GoogleTest and GoogleMock
         shell: bash
         run: |
-          set -Eeuo pipefail
-          git clone "$CARES_REMOTE" "$SRC_DIR"
-          cd "$SRC_DIR"
+          set -euxo pipefail
 
-          if ! git cat-file -e "$CARES_REVISION^{commit}" 2>/dev/null; then
-            git fetch --depth=1 origin "$CARES_REVISION"
-          fi
-          git checkout --detach "$CARES_REVISION"
+          # Ubuntu may expose GTestConfig.cmake without the GTest::gmock target.
+          # Build and install the packaged googletest sources into /usr/local,
+          # then explicitly pass that config directory to c-ares.
+          sudo rm -rf /tmp/googletest-build
+          sudo cmake -S /usr/src/googletest -B /tmp/googletest-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_GMOCK=ON \
+            -DINSTALL_GTEST=ON
+          sudo cmake --build /tmp/googletest-build --parallel "$(nproc)"
+          sudo cmake --install /tmp/googletest-build
+          sudo ldconfig
 
-          actual_revision="$(git rev-parse HEAD)"
-          [[ "$actual_revision" == "$CARES_REVISION" ]]
+          test -f /usr/local/lib/cmake/GTest/GTestConfig.cmake
+          grep -R "GTest::gmock" /usr/local/lib/cmake/GTest
 
-      - name: Configure build (${{ matrix.id }})
-        id: configure
+      - name: Clone c-ares
         shell: bash
         run: |
-          set -Eeuo pipefail
-          cd "$SRC_DIR"
-          build_dir="$SRC_DIR/build-$BUILD_ID"
-          echo "build_dir=$build_dir" >> "$GITHUB_OUTPUT"
+          set -euxo pipefail
 
-          export CC=clang
-          export CXX=clang++
+          git clone https://github.com/c-ares/c-ares.git c-ares
+          cd c-ares
+          git checkout "${{ inputs.cares_ref }}"
+          git submodule update --init --recursive
+          git rev-parse HEAD | tee ../CARES_COMMIT.txt
+          git status --short
 
-          common_flags=(
-            -DCARES_STATIC=ON
-            -DCARES_SHARED=OFF
-            -DCARES_BUILD_TESTS=ON
-            -DCARES_BUILD_TOOLS=ON
-            -G Ninja
-          )
+      - name: Configure ${{ matrix.name }}
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-          case "$BUILD_ID" in
-            x64-asan-ubsan)
-              # Primary hunting ground: use-after-free / double-free in the
-              # async retry paths, OOB reads in packet decompression and
-              # record parsers.
-              export CFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g -O1"
-              export CXXFLAGS="$CFLAGS"
-              export LDFLAGS="-fsanitize=address,undefined"
-              cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug "${common_flags[@]}"
+          cmake -S c-ares -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/$INSTALL_DIR" \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DGTest_DIR=/usr/local/lib/cmake/GTest \
+            -DCMAKE_PREFIX_PATH=/usr/local \
+            -DCMAKE_C_FLAGS="${{ matrix.c_flags }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}" \
+            -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.linker_flags }}" \
+            -DCARES_STATIC=ON \
+            -DCARES_SHARED=ON \
+            -DCARES_STATIC_PIC=ON \
+            -DCARES_BUILD_TESTS=ON \
+            -DCARES_BUILD_TOOLS=ON \
+            -DCARES_THREADS=ON \
+            -DCARES_WERROR=OFF \
+            -DCARES_COVERAGE=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build library, tools, tests, and fuzz drivers
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cmake --build "$BUILD_DIR" --parallel "$(nproc)" --verbose
+
+          echo "Built executables:"
+          find "$BUILD_DIR" -maxdepth 4 -type f -executable -print | sort
+
+      - name: Verify sanitizer instrumentation
+        if: matrix.id == 'asan-ubsan' || matrix.id == 'msan' || matrix.id == 'tsan'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          case "${{ matrix.id }}" in
+            asan-ubsan)
+              needle='__asan_init|__ubsan_handle'
               ;;
-
-            x64-tsan)
-              # Targets races in the reworked async engine: query lifetime
-              # crossing ares_requeue_query / read_answer / process_answer.
-              export CFLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1"
-              export CXXFLAGS="$CFLAGS"
-              export LDFLAGS="-fsanitize=thread"
-              cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug "${common_flags[@]}"
+            msan)
+              needle='__msan_init'
               ;;
-
-            x64-msan)
-              # Uninitialized-read hunting in the record parsers (SVCB/HTTPS,
-              # CAA, NAPTR). NOTE: system libc/libc++ are not MSan-instrumented
-              # on this runner, so expect some false positives originating
-              # from library frames — treat findings inside libc as
-              # suspect until reproduced against an instrumented libc++.
-              export CFLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -g -O1 -stdlib=libc++"
-              export CXXFLAGS="$CFLAGS"
-              export LDFLAGS="-fsanitize=memory -stdlib=libc++"
-              cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug "${common_flags[@]}"
-              ;;
-
-            x64-debug-asserts)
-              # No sanitizer instrumentation — used for GDB/Valgrind triage
-              # and as a control build to confirm sanitizer-only findings.
-              export CFLAGS="-fno-omit-frame-pointer -g -O0"
-              export CXXFLAGS="$CFLAGS"
-              cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug "${common_flags[@]}"
-              ;;
-
-            x64-release-symbolized)
-              # Optimized but symbolized baseline, useful for DoS / CPU
-              # exhaustion timing work (e.g. compression-pointer-chain class)
-              # where debug builds skew timing too much to be representative.
-              export CFLAGS="-fno-omit-frame-pointer -g -O2 -D_FORTIFY_SOURCE=2"
-              export CXXFLAGS="$CFLAGS"
-              cmake -S . -B "$build_dir" -DCMAKE_BUILD_TYPE=RelWithDebInfo "${common_flags[@]}"
-              ;;
-
-            *)
-              echo "Unknown build id: $BUILD_ID" >&2
-              exit 1
+            tsan)
+              needle='__tsan_init'
               ;;
           esac
 
-          # Record the effective cache so option names/defaults can be
-          # verified against whatever c-ares revision was actually checked
-          # out (CMake option surface has shifted across 1.30–1.34.x).
-          cmake -B "$build_dir" -LAH > "$build_dir/effective-cmake-cache.txt" 2>&1 || true
-
-      - name: Build with ninja
-        shell: bash
-        env:
-          BUILD_DIR: ${{ steps.configure.outputs.build_dir }}
-        run: |
-          set -Eeuo pipefail
-          ninja -C "$BUILD_DIR" -j "$(nproc)"
-          df -h
-
-      - name: Run test suite / smoke checks
-        shell: bash
-        env:
-          BUILD_DIR: ${{ steps.configure.outputs.build_dir }}
-        run: |
-          set -Eeuo pipefail
-          cd "$BUILD_DIR"
-
-          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=1:symbolize=1"
-          export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
-          export TSAN_OPTIONS="halt_on_error=1:history_size=7"
-          export MSAN_OPTIONS="abort_on_error=1:poison_in_dtor=1"
-
-          # ctest is allowed to report failures without failing the job:
-          # a sanitizer trip or crash inside the suite is itself a result
-          # worth keeping the archive for, not a reason to discard it.
-          ctest --output-on-failure -j "$(nproc)" 2>&1 | tee ctest-output.log || true
-
-          if [[ "$BUILD_ID" == x64-debug-asserts ]]; then
-            find . -maxdepth 1 -type f -executable -name 'ares_test*' -print0 \
-              | xargs -0 -r -I{} valgrind --error-exitcode=99 --leak-check=full \
-                  --log-file=valgrind-%p.log {} --gtest_filter='-*Live*' \
-              || true
-          fi
-
-      - name: Package build artifacts
-        id: package
-        shell: bash
-        env:
-          BUILD_DIR: ${{ steps.configure.outputs.build_dir }}
-        run: |
-          set -Eeuo pipefail
-          stage="$PACKAGE_ROOT/c-ares-$BUILD_ID-$CARES_SHORT_REVISION"
-          archive="$RUNNER_TEMP/c-ares-$BUILD_ID-$CARES_SHORT_REVISION-linux-x64.tar.gz"
-          mkdir -p "$stage"
-
-          find "$BUILD_DIR" -maxdepth 2 -type f \
-            \( -name 'libcares*' -o -name 'ares_test*' -o -name 'adig' -o -name 'ahost' -o -name 'acountry' \) \
-            -exec cp -a {} "$stage/" \; 2>/dev/null || true
-
-          cp "$BUILD_DIR/effective-cmake-cache.txt" "$stage/" 2>/dev/null || true
-          cp "$BUILD_DIR/ctest-output.log" "$stage/" 2>/dev/null || true
-          cp "$BUILD_DIR"/valgrind-*.log "$stage/" 2>/dev/null || true
-          cp -r "$SRC_DIR/include" "$stage/include" 2>/dev/null || true
-
-          {
-            echo "build_id=$BUILD_ID"
-            echo "cares_revision=$CARES_REVISION"
-            echo "target_cpu=x64"
-            echo "runner=$RUNNER_NAME"
-            echo "nproc=$(nproc)"
-            echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "clang_version=$(clang --version | head -1)"
-          } > "$stage/BUILD_INFO.txt"
-
-          (
-            cd "$stage"
-            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          mapfile -t candidates < <(
+            find "$BUILD_DIR" -type f -executable \
+              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' -o -name 'adig' -o -name 'ahost' \)
           )
 
-          tar -C "$PACKAGE_ROOT" -cf - "$(basename "$stage")" \
-            | pigz -1 -p "$(nproc)" > "$archive"
-
-          test -s "$archive"
-          sha256sum "$archive"
-          ls -lh "$archive"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-          echo "archive_name=$(basename "$archive")" >> "$GITHUB_OUTPUT"
-
-      - name: Upload archive to sendit.sh
-        id: sendit
-        shell: bash
-        env:
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
-        run: |
-          set -Eeuo pipefail
-          response="$(curl \
-            --fail-with-body \
-            --location \
-            --retry 5 \
-            --retry-all-errors \
-            --connect-timeout 30 \
-            -T "$ARCHIVE" \
-            https://sendit.sh)"
-
-          printf '%s\n' "$response"
-          url="$(printf '%s\n' "$response" | grep -Eo 'https?://[^[:space:]<>]+' | tail -n 1)"
-          [[ -n "$url" ]]
-
-          link_file="$RUNNER_TEMP/sendit-link-${{ matrix.order }}-$BUILD_ID.txt"
-          printf '%s\t%s\t%s\n' "$BUILD_ID" "$ARCHIVE_NAME" "$url" > "$link_file"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "link_file=$link_file" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## $BUILD_ID"
-            echo
-            echo "- c-ares revision: \`$CARES_REVISION\`"
-            echo "- Archive: \`$ARCHIVE_NAME\`"
-            echo "- Download: $url"
-            echo "- SHA-256: \`$(sha256sum "$ARCHIVE" | awk '{print $1}')\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Save link record
-        uses: actions/upload-artifact@v4
-        with:
-          name: sendit-link-${{ matrix.order }}-${{ matrix.id }}
-          path: ${{ steps.sendit.outputs.link_file }}
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
-
-      - name: Optional GitHub artifact backup
-        if: ${{ inputs.keep_github_backup }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: c-ares-${{ matrix.id }}-${{ needs.resolve-source.outputs.cares_short_revision }}
-          path: ${{ steps.package.outputs.archive }}
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
-
-  collect-links:
-    name: Collect all download links
-    needs: [resolve-source, build-cares]
-    if: ${{ always() }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Download link records
-        uses: actions/download-artifact@v4
-        with:
-          pattern: sendit-link-*
-          path: links
-          merge-multiple: true
-
-      - name: Create final link table
-        shell: bash
-        env:
-          CARES_REVISION: ${{ needs.resolve-source.outputs.cares_revision }}
-        run: |
-          set -Eeuo pipefail
-          shopt -s nullglob
-          files=(links/sendit-link-*.txt)
-
-          {
-            echo "# c-ares x64 security-research build links"
-            echo
-            echo "- c-ares revision: \`$CARES_REVISION\`"
-            echo
-            echo "| Build | Archive | Download |"
-            echo "|---|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          : > all-sendit-links.txt
-          for file in $(printf '%s\n' "${files[@]}" | sort); do
-            IFS=$'\t' read -r build archive url < "$file"
-            printf '%s\t%s\t%s\n' "$build" "$archive" "$url" >> all-sendit-links.txt
-            printf '| `%s` | `%s` | %s |\n' "$build" "$archive" "$url" >> "$GITHUB_STEP_SUMMARY"
-          done
-
-          if (( ${#files[@]} != 5 )); then
-            echo "Expected 5 successful uploads, found ${#files[@]}." >&2
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "No executable candidate found for instrumentation verification"
             exit 1
           fi
 
-      - name: Retain combined link list
+          verified=0
+          for binary in "${candidates[@]}"; do
+            if nm -an "$binary" 2>/dev/null | grep -Eq "$needle"; then
+              echo "Instrumentation detected in $binary"
+              verified=1
+              break
+            fi
+          done
+
+          test "$verified" -eq 1
+
+      - name: Run tests and bundled fuzz corpora
+        if: inputs.run_tests && matrix.run_tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          export LLVM_SYMBOLIZER_PATH="$(command -v llvm-symbolizer)"
+
+          # Convert the matrix runtime string into exported KEY=VALUE pairs.
+          while IFS= read -r assignment; do
+            [ -z "$assignment" ] && continue
+            export "$assignment"
+          done < <(printf '%s\n' '${{ matrix.runtime_env }}' | tr ' ' '\n')
+
+          ctest --test-dir "$BUILD_DIR" \
+            --output-on-failure \
+            --timeout 180 \
+            --parallel "$(nproc)"
+
+      - name: Generate LLVM coverage report
+        if: matrix.id == 'coverage' && inputs.run_tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mapfile -t profiles < <(find . -name '*.profraw' -type f)
+          if [ "${#profiles[@]}" -eq 0 ]; then
+            echo "No .profraw files were produced"
+            exit 1
+          fi
+
+          llvm-profdata merge -sparse "${profiles[@]}" -o "$BUILD_DIR/cares.profdata"
+
+          mapfile -t objects < <(
+            find "$BUILD_DIR" -type f -executable \
+              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' -o -name 'adig' -o -name 'ahost' \)
+          )
+
+          if [ "${#objects[@]}" -eq 0 ]; then
+            echo "No instrumented executables found"
+            exit 1
+          fi
+
+          primary_object="${objects[0]}"
+          object_args=()
+          for object in "${objects[@]:1}"; do
+            object_args+=( -object "$object" )
+          done
+
+          llvm-cov report "$primary_object" "${object_args[@]}" \
+            -instr-profile="$BUILD_DIR/cares.profdata" \
+            -ignore-filename-regex='(test|third_party|CMakeFiles)' \
+            | tee "$BUILD_DIR/coverage-summary.txt"
+
+          llvm-cov show "$primary_object" "${object_args[@]}" \
+            -instr-profile="$BUILD_DIR/cares.profdata" \
+            -format=html \
+            -output-dir="$BUILD_DIR/coverage-html" \
+            -ignore-filename-regex='(test|third_party|CMakeFiles)'
+
+      - name: Install build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --install "$BUILD_DIR"
+
+      - name: Package research build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$PACKAGE_DIR"/{bin,lib,include,build-info,corpora,source}
+
+          copy_if_exists() {
+            local src="$1"
+            local dst="$2"
+            if [ -e "$src" ]; then
+              cp -a "$src" "$dst"
+            fi
+          }
+
+          copy_tree_if_exists() {
+            local src="$1"
+            local dst="$2"
+            if [ -d "$src" ]; then
+              mkdir -p "$dst"
+              cp -a "$src/." "$dst/"
+            fi
+          }
+
+          copy_tree_if_exists "$INSTALL_DIR/bin" "$PACKAGE_DIR/bin"
+          copy_tree_if_exists "$INSTALL_DIR/lib" "$PACKAGE_DIR/lib"
+          copy_tree_if_exists "$INSTALL_DIR/include" "$PACKAGE_DIR/include"
+
+          while IFS= read -r binary; do
+            copy_if_exists "$binary" "$PACKAGE_DIR/bin/"
+          done < <(
+            find "$BUILD_DIR" -type f -executable \
+              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' \
+                 -o -name 'dnsdump' -o -name 'ares_queryloop' -o -name 'adig' -o -name 'ahost' \)
+          )
+
+          find "$BUILD_DIR" -type f \
+            \( -name 'libcares*.a' -o -name 'libcares*.so*' \) \
+            -exec cp -a {} "$PACKAGE_DIR/lib/" \;
+
+          copy_if_exists "$BUILD_DIR/compile_commands.json" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/CMakeCache.txt" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/coverage-summary.txt" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/cares.profdata" "$PACKAGE_DIR/build-info/"
+          copy_tree_if_exists "$BUILD_DIR/coverage-html" "$PACKAGE_DIR/coverage-html"
+          copy_if_exists "CARES_COMMIT.txt" "$PACKAGE_DIR/build-info/"
+
+          copy_tree_if_exists "c-ares/test/fuzzinput" "$PACKAGE_DIR/corpora/fuzzinput"
+          copy_tree_if_exists "c-ares/test/fuzznames" "$PACKAGE_DIR/corpora/fuzznames"
+
+          for src in \
+            c-ares/src/lib/ares_process.c \
+            c-ares/src/lib/ares_getaddrinfo.c \
+            c-ares/src/lib/ares_dns_record.c \
+            c-ares/src/lib/ares_parse_*.c \
+            c-ares/src/lib/ares_expand_name.c
+          do
+            for file in $src; do
+              copy_if_exists "$file" "$PACKAGE_DIR/source/"
+            done
+          done
+
+          cat > "$PACKAGE_DIR/RUN_ENV.sh" <<EOF
+          #!/usr/bin/env bash
+          HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+          export PATH="\$HERE/bin:\$PATH"
+          export LD_LIBRARY_PATH="\$HERE/lib:\${LD_LIBRARY_PATH:-}"
+          export LLVM_SYMBOLIZER_PATH="\${LLVM_SYMBOLIZER_PATH:-\$(command -v llvm-symbolizer 2>/dev/null || true)}"
+          EOF
+
+          case "${{ matrix.id }}" in
+            asan-ubsan)
+              cat >> "$PACKAGE_DIR/RUN_ENV.sh" <<'EOF'
+          export ASAN_OPTIONS="abort_on_error=1:halt_on_error=1:detect_leaks=1:strict_string_checks=1:symbolize=1"
+          export UBSAN_OPTIONS="abort_on_error=1:halt_on_error=1:print_stacktrace=1:symbolize=1"
+          EOF
+              ;;
+            msan)
+              cat >> "$PACKAGE_DIR/RUN_ENV.sh" <<'EOF'
+          export MSAN_OPTIONS="abort_on_error=1:halt_on_error=1:exit_code=86:track_origins=2:symbolize=1:print_stats=1"
+          EOF
+              ;;
+            tsan)
+              cat >> "$PACKAGE_DIR/RUN_ENV.sh" <<'EOF'
+          export TSAN_OPTIONS="abort_on_error=1:halt_on_error=1:second_deadlock_stack=1:history_size=7:symbolize=1"
+          EOF
+              ;;
+          esac
+
+          chmod +x "$PACKAGE_DIR/RUN_ENV.sh"
+
+          cat > "$PACKAGE_DIR/README_RUN.txt" <<EOF
+          c-ares security research build
+          Build: ${{ matrix.name }}
+          Commit: $(cat CARES_COMMIT.txt)
+
+          Usage:
+            source ./RUN_ENV.sh
+            ./bin/arestest
+
+          Bundled parser corpus drivers, when present:
+            ./bin/aresfuzz corpora/fuzzinput/*
+            ./bin/aresfuzzname corpora/fuzznames/*
+
+          Notes:
+          - MSan is most reliable when every dependency involved in the tested path is also MSan-instrumented.
+          - TSan is intended for threaded asynchronous/channel lifecycle testing.
+          - ASan+UBSan is the default build for malformed packet and parser PoCs.
+          EOF
+
+          find "$PACKAGE_DIR" -maxdepth 4 -type f | sort
+
+      - name: Create archive and checksum
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ARCHIVE="c-ares-${{ matrix.id }}-x86_64-linux.zip"
+          cd package
+          zip -r "../$ARCHIVE" "c-ares-${{ matrix.id }}"
+          cd ..
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: all-sendit-links-${{ needs.resolve-source.outputs.cares_short_revision }}
-          path: all-sendit-links.txt
+          name: c-ares-${{ matrix.id }}-x86_64-linux
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 14
           compression-level: 0
+          path: |
+            c-ares-${{ matrix.id }}-x86_64-linux.zip
+            c-ares-${{ matrix.id }}-x86_64-linux.zip.sha256
