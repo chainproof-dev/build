@@ -1,29 +1,132 @@
-name: Build FFmpeg MSan Runtime
+name: Build c-ares Security Research Targets
 
 on:
   workflow_dispatch:
     inputs:
-      ffmpeg_ref:
-        description: "FFmpeg git ref, branch, tag, or commit"
+      cares_ref:
+        description: "c-ares git ref, branch, tag, or commit"
         required: false
-        default: "master"
+        default: "main"
+      run_tests:
+        description: "Run the c-ares test suite after building"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
 
 jobs:
-  build-msan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            id: asan-ubsan
+            build_type: Debug
+            c_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=address,undefined
+              -fno-sanitize-recover=all
+            cxx_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=address,undefined
+              -fno-sanitize-recover=all
+            linker_flags: >-
+              -fsanitize=address,undefined
+            runtime_env: >-
+              ASAN_OPTIONS=abort_on_error=1:halt_on_error=1:detect_leaks=1:strict_string_checks=1:check_initialization_order=1:symbolize=1
+              UBSAN_OPTIONS=abort_on_error=1:halt_on_error=1:print_stacktrace=1:symbolize=1
+            run_tests: true
+
+          - name: MemorySanitizer
+            id: msan
+            build_type: Debug
+            c_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=memory -fsanitize-memory-track-origins=2
+              -fPIE
+            cxx_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=memory -fsanitize-memory-track-origins=2
+              -fPIE
+            linker_flags: >-
+              -fsanitize=memory -fsanitize-memory-track-origins=2
+              -fPIE -pie
+            runtime_env: >-
+              MSAN_OPTIONS=abort_on_error=1:halt_on_error=1:exit_code=86:track_origins=2:symbolize=1:print_stats=1
+            # GTest/libstdc++ from Ubuntu are not MSan-instrumented. Build and package
+            # the targets, but do not execute them automatically to avoid false positives.
+            run_tests: false
+
+          - name: ThreadSanitizer
+            id: tsan
+            build_type: Debug
+            c_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=thread
+            cxx_flags: >-
+              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+              -fsanitize=thread
+            linker_flags: >-
+              -fsanitize=thread
+            runtime_env: >-
+              TSAN_OPTIONS=abort_on_error=1:halt_on_error=1:second_deadlock_stack=1:history_size=7:symbolize=1
+            run_tests: true
+
+          - name: Coverage
+            id: coverage
+            build_type: Debug
+            c_flags: >-
+              -O0 -g3 -fno-omit-frame-pointer
+              -fprofile-instr-generate -fcoverage-mapping
+            cxx_flags: >-
+              -O0 -g3 -fno-omit-frame-pointer
+              -fprofile-instr-generate -fcoverage-mapping
+            linker_flags: >-
+              -fprofile-instr-generate -fcoverage-mapping
+            runtime_env: >-
+              LLVM_PROFILE_FILE=cares-%p.profraw
+            run_tests: true
+
+          - name: Hardened RelWithDebInfo
+            id: hardened
+            build_type: RelWithDebInfo
+            c_flags: >-
+              -O2 -g3 -fno-omit-frame-pointer
+              -fstack-protector-strong -D_FORTIFY_SOURCE=3
+              -fPIE -Wformat -Wformat-security -Werror=format-security
+            cxx_flags: >-
+              -O2 -g3 -fno-omit-frame-pointer
+              -fstack-protector-strong -D_FORTIFY_SOURCE=3
+              -fPIE -Wformat -Wformat-security -Werror=format-security
+            linker_flags: >-
+              -fPIE -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
+            runtime_env: ""
+            run_tests: true
+
+          - name: Release Baseline
+            id: release
+            build_type: Release
+            c_flags: >-
+              -O2 -g1 -fno-omit-frame-pointer
+            cxx_flags: >-
+              -O2 -g1 -fno-omit-frame-pointer
+            linker_flags: ""
+            runtime_env: ""
+            run_tests: true
 
     env:
-      BUILD_NAME: msan
       CC: clang
       CXX: clang++
-      CFLAGS_EXTRA: >-
-        -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
-        -fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE
-      LDFLAGS_EXTRA: >-
-        -fsanitize=memory -fsanitize-memory-track-origins=2 -fPIE -pie
-      ESSENTIAL_TARGETS: "ffmpeg ffprobe"
-      OPTIONAL_TARGETS: "tests/videogen tools/target_dem_fuzzer"
+      BUILD_DIR: build-${{ matrix.id }}
+      INSTALL_DIR: install-${{ matrix.id }}
+      PACKAGE_DIR: package/c-ares-${{ matrix.id }}
 
     steps:
       - name: Install dependencies
@@ -32,297 +135,299 @@ jobs:
           set -euxo pipefail
 
           sudo apt-get update
-          sudo apt-get install -y \
-            git build-essential clang lld pkg-config yasm nasm \
-            zlib1g-dev libssl-dev libxml2-dev zip curl python3 ca-certificates \
-            file xz-utils
+          sudo apt-get install -y --no-install-recommends \
+            git build-essential clang llvm lld cmake ninja-build \
+            pkg-config libc-ares-dev libgtest-dev googletest \
+            python3 zip file ca-certificates
 
-      - name: Clone FFmpeg
+          clang --version
+          cmake --version
+          ninja --version
+          llvm-symbolizer --version
+
+      - name: Clone c-ares
         shell: bash
         run: |
           set -euxo pipefail
 
-          git clone https://github.com/FFmpeg/FFmpeg.git ffmpeg
-          cd ffmpeg
-          git checkout "${{ github.event.inputs.ffmpeg_ref }}"
-          git rev-parse HEAD | tee ../FFMPEG_COMMIT.txt
+          git clone https://github.com/c-ares/c-ares.git c-ares
+          cd c-ares
+          git checkout "${{ inputs.cares_ref }}"
+          git submodule update --init --recursive
+          git rev-parse HEAD | tee ../CARES_COMMIT.txt
           git status --short
 
-      - name: Configure FFmpeg for MemorySanitizer
+      - name: Configure ${{ matrix.name }}
         shell: bash
-        working-directory: ffmpeg
         run: |
           set -euxo pipefail
 
-          mkdir -p "../out/$BUILD_NAME"
+          cmake -S c-ares -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/$INSTALL_DIR" \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_C_FLAGS="${{ matrix.c_flags }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}" \
+            -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.linker_flags }}" \
+            -DCARES_STATIC=ON \
+            -DCARES_SHARED=ON \
+            -DCARES_STATIC_PIC=ON \
+            -DCARES_BUILD_TESTS=ON \
+            -DCARES_BUILD_TOOLS=ON \
+            -DCARES_THREADS=ON \
+            -DCARES_WERROR=OFF \
+            -DCARES_COVERAGE=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-          CMD=(
-            ./configure
-            --prefix="$PWD/../out/$BUILD_NAME"
-            --cc="$CC"
-            --cxx="$CXX"
-            --ld=clang
-            --disable-stripping
-            --enable-debug=3
-            --disable-optimizations
-            --disable-x86asm
-            --extra-cflags="$CFLAGS_EXTRA"
-            --extra-cxxflags="$CFLAGS_EXTRA"
-            --extra-ldflags="$LDFLAGS_EXTRA"
+      - name: Build library, tools, tests, and fuzz drivers
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cmake --build "$BUILD_DIR" --parallel "$(nproc)" --verbose
+
+          echo "Built executables:"
+          find "$BUILD_DIR" -maxdepth 4 -type f -executable -print | sort
+
+      - name: Verify sanitizer instrumentation
+        if: matrix.id == 'asan-ubsan' || matrix.id == 'msan' || matrix.id == 'tsan'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          case "${{ matrix.id }}" in
+            asan-ubsan)
+              needle='__asan_init|__ubsan_handle'
+              ;;
+            msan)
+              needle='__msan_init'
+              ;;
+            tsan)
+              needle='__tsan_init'
+              ;;
+          esac
+
+          mapfile -t candidates < <(
+            find "$BUILD_DIR" -type f -executable \
+              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' -o -name 'adig' -o -name 'ahost' \)
           )
 
-          echo "[+] Configure command:"
-          printf ' %q' "${CMD[@]}"
-          printf '\n'
-
-          "${CMD[@]}"
-
-      - name: Build essential targets
-        shell: bash
-        working-directory: ffmpeg
-        run: |
-          set -euxo pipefail
-
-          echo "[+] Building essential targets: $ESSENTIAL_TARGETS"
-
-          for target in $ESSENTIAL_TARGETS; do
-            echo "[+] make $target"
-            make -j"$(nproc)" "$target"
-          done
-
-      - name: Build optional targets
-        shell: bash
-        working-directory: ffmpeg
-        run: |
-          set -uxo pipefail
-
-          echo "[+] Optional targets: $OPTIONAL_TARGETS"
-
-          for target in $OPTIONAL_TARGETS; do
-            echo "[+] Trying optional target: $target"
-            if make -j"$(nproc)" "$target"; then
-              echo "[OK] Built optional target: $target"
-            else
-              echo "[WARN] Optional target failed or does not exist: $target"
-            fi
-          done
-
-          if [ ! -x tests/videogen ]; then
-            echo "[WARN] tests/videogen missing. Trying manual MSan fallback compile."
-
-            "$CC" \
-              $CFLAGS_EXTRA \
-              -I. -I./ \
-              -o tests/videogen \
-              tests/videogen.c -lm \
-              $LDFLAGS_EXTRA || echo "[WARN] manual videogen fallback failed"
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "No executable candidate found for instrumentation verification"
+            exit 1
           fi
 
-      - name: Install FFmpeg
-        shell: bash
-        working-directory: ffmpeg
-        run: |
-          set -uxo pipefail
-
-          echo "[+] Running make install"
-          if make install; then
-            echo "[OK] make install succeeded"
-          else
-            echo "[WARN] make install failed. Packaging will continue from build tree."
-          fi
-
-      - name: Verify MSan instrumentation
-        shell: bash
-        working-directory: ffmpeg
-        run: |
-          set -euxo pipefail
-
-          strings ffmpeg | grep -q "MemorySanitizer" || {
-            echo "[ERROR] ffmpeg does not appear to contain the MSan runtime"
-            exit 1
-          }
-
-          strings ffprobe | grep -q "MemorySanitizer" || {
-            echo "[ERROR] ffprobe does not appear to contain the MSan runtime"
-            exit 1
-          }
-
-          echo "[OK] MSan runtime detected in ffmpeg and ffprobe"
-
-      - name: Collect build files safely
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          PKG="package/$BUILD_NAME"
-          PREFIX="$PWD/out/$BUILD_NAME"
-
-          mkdir -p "$PKG/bin" "$PKG/lib" "$PKG/include" "$PKG/build-info" "$PKG/src-snippets"
-
-          copy_if_exists() {
-            SRC="$1"
-            DST="$2"
-
-            if [ -e "$SRC" ]; then
-              cp -a "$SRC" "$DST"
-              echo "[copy] $SRC -> $DST"
-            else
-              echo "[skip] missing: $SRC"
-            fi
-          }
-
-          copy_dir_if_exists() {
-            SRC="$1"
-            DST="$2"
-
-            if [ -d "$SRC" ]; then
-              mkdir -p "$DST"
-              cp -a "$SRC/." "$DST/" || true
-              echo "[copy-dir] $SRC -> $DST"
-            else
-              echo "[skip-dir] missing: $SRC"
-            fi
-          }
-
-          copy_if_exists "ffmpeg/ffmpeg" "$PKG/bin/"
-          copy_if_exists "ffmpeg/ffprobe" "$PKG/bin/"
-          copy_if_exists "ffmpeg/tests/videogen" "$PKG/bin/"
-          copy_if_exists "ffmpeg/tools/target_dem_fuzzer" "$PKG/bin/"
-
-          copy_if_exists "$PREFIX/bin/ffmpeg" "$PKG/bin/"
-          copy_if_exists "$PREFIX/bin/ffprobe" "$PKG/bin/"
-
-          copy_dir_if_exists "$PREFIX/lib" "$PKG/lib"
-          copy_dir_if_exists "$PREFIX/include" "$PKG/include"
-
-          for lib in \
-            ffmpeg/libavutil/libavutil.a \
-            ffmpeg/libavcodec/libavcodec.a \
-            ffmpeg/libavformat/libavformat.a \
-            ffmpeg/libavdevice/libavdevice.a \
-            ffmpeg/libavfilter/libavfilter.a \
-            ffmpeg/libswscale/libswscale.a \
-            ffmpeg/libswresample/libswresample.a
-          do
-            copy_if_exists "$lib" "$PKG/lib/"
-          done
-
-          copy_if_exists "ffmpeg/config.h" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/config.log" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/ffbuild/config.log" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/ffbuild/config.mak" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/ffbuild/config.sh" "$PKG/build-info/"
-          copy_if_exists "FFMPEG_COMMIT.txt" "$PKG/build-info/"
-
-          for src in \
-            ffmpeg/libavformat/webp_anim_dec.c \
-            ffmpeg/libavformat/http.c \
-            ffmpeg/libavformat/rtsp.c \
-            ffmpeg/libavformat/mov.c \
-            ffmpeg/libavformat/concatdec.c \
-            ffmpeg/libavformat/id3v2.c \
-            ffmpeg/libavformat/omadec.c \
-            ffmpeg/libavformat/matroskadec.c \
-            ffmpeg/libavutil/rc4.c \
-            ffmpeg/libavutil/blowfish.c \
-            ffmpeg/libavutil/aes_ctr.c \
-            ffmpeg/tests/videogen.c \
-            ffmpeg/tests/utils.c
-          do
-            copy_if_exists "$src" "$PKG/src-snippets/"
-          done
-
-          cat > "$PKG/RUN_ENV.sh" <<'RUNEOF'
-          #!/usr/bin/env bash
-          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"
-          export MSAN_OPTIONS="halt_on_error=1:abort_on_error=1:exit_code=86:symbolize=1:print_stats=1:track_origins=2"
-          export PATH="$HERE/bin:$PATH"
-          RUNEOF
-
-          chmod +x "$PKG/RUN_ENV.sh"
-
-          cat > "$PKG/README_RUN.txt" <<EOF2
-          Build: $BUILD_NAME
-          Sanitizer: Clang MemorySanitizer with origin tracking level 2
-          Commit: $(cat FFMPEG_COMMIT.txt 2>/dev/null || echo unknown)
-
-          Usage:
-            cd $BUILD_NAME
-            source ./RUN_ENV.sh
-            ./bin/ffmpeg -version
-            ./bin/ffprobe -version
-
-          WebP test example:
-            ./bin/ffprobe -v trace crafted.webp
-
-          A MemorySanitizer finding exits with status 86.
-          EOF2
-
-          echo "[+] Packaged files:"
-          find "$PKG" -maxdepth 4 -type f | sort
-
-          echo "[+] Binary file info:"
-          find "$PKG/bin" -maxdepth 1 -type f -exec file {} \; || true
-
-      - name: Zip build
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          ZIP="ffmpeg-$BUILD_NAME-x64-linux.zip"
-
-          cd package
-          zip -r "../$ZIP" "$BUILD_NAME"
-          cd ..
-
-          sha256sum "$ZIP" | tee "$ZIP.sha256"
-          ls -lh "$ZIP" "$ZIP.sha256"
-
-      - name: Upload to sendit.sh
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -uxo pipefail
-
-          ZIP="ffmpeg-$BUILD_NAME-x64-linux.zip"
-          LINK_FILE="ffmpeg-$BUILD_NAME-sendit-link.txt"
-
-          echo "[+] Uploading $ZIP to sendit.sh"
-
-          LINK=""
-
-          for i in 1 2 3 4 5; do
-            echo "[+] Upload attempt $i"
-
-            LINK="$(curl -fsS --retry 3 --retry-all-errors -T "$ZIP" https://sendit.sh || true)"
-
-            if echo "$LINK" | grep -Eiq 'https?://'; then
-              echo "[OK] Upload succeeded"
+          verified=0
+          for binary in "${candidates[@]}"; do
+            if nm -an "$binary" 2>/dev/null | grep -Eq "$needle"; then
+              echo "Instrumentation detected in $binary"
+              verified=1
               break
             fi
-
-            echo "[WARN] Upload failed or no link returned. Response:"
-            echo "$LINK"
-            sleep 10
           done
 
-          if ! echo "$LINK" | grep -Eiq 'https?://'; then
-            echo "[WARN] sendit upload failed after retries"
-            LINK="SENDIT_UPLOAD_FAILED_USE_GITHUB_ARTIFACT"
+          test "$verified" -eq 1
+
+      - name: Run tests and bundled fuzz corpora
+        if: inputs.run_tests && matrix.run_tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          export LLVM_SYMBOLIZER_PATH="$(command -v llvm-symbolizer)"
+
+          # Convert the matrix runtime string into exported KEY=VALUE pairs.
+          while IFS= read -r assignment; do
+            [ -z "$assignment" ] && continue
+            export "$assignment"
+          done < <(printf '%s\n' '${{ matrix.runtime_env }}' | tr ' ' '\n')
+
+          ctest --test-dir "$BUILD_DIR" \
+            --output-on-failure \
+            --timeout 180 \
+            --parallel "$(nproc)"
+
+      - name: Generate LLVM coverage report
+        if: matrix.id == 'coverage' && inputs.run_tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mapfile -t profiles < <(find . -name '*.profraw' -type f)
+          if [ "${#profiles[@]}" -eq 0 ]; then
+            echo "No .profraw files were produced"
+            exit 1
           fi
 
-          echo "Download link for $BUILD_NAME:"
-          echo "$LINK"
-          echo "$LINK" > "$LINK_FILE"
+          llvm-profdata merge -sparse "${profiles[@]}" -o "$BUILD_DIR/cares.profdata"
 
-      - name: Upload GitHub artifact backup
+          mapfile -t objects < <(
+            find "$BUILD_DIR" -type f -executable \
+              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' -o -name 'adig' -o -name 'ahost' \)
+          )
+
+          if [ "${#objects[@]}" -eq 0 ]; then
+            echo "No instrumented executables found"
+            exit 1
+          fi
+
+          primary_object="${objects[0]}"
+          object_args=()
+          for object in "${objects[@]:1}"; do
+            object_args+=( -object "$object" )
+          done
+
+          llvm-cov report "$primary_object" "${object_args[@]}" \
+            -instr-profile="$BUILD_DIR/cares.profdata" \
+            -ignore-filename-regex='(test|third_party|CMakeFiles)' \
+            | tee "$BUILD_DIR/coverage-summary.txt"
+
+          llvm-cov show "$primary_object" "${object_args[@]}" \
+            -instr-profile="$BUILD_DIR/cares.profdata" \
+            -format=html \
+            -output-dir="$BUILD_DIR/coverage-html" \
+            -ignore-filename-regex='(test|third_party|CMakeFiles)'
+
+      - name: Install build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --install "$BUILD_DIR"
+
+      - name: Package research build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$PACKAGE_DIR"/{bin,lib,include,build-info,corpora,source}
+
+          copy_if_exists() {
+            local src="$1"
+            local dst="$2"
+            if [ -e "$src" ]; then
+              cp -a "$src" "$dst"
+            fi
+          }
+
+          copy_tree_if_exists() {
+            local src="$1"
+            local dst="$2"
+            if [ -d "$src" ]; then
+              mkdir -p "$dst"
+              cp -a "$src/." "$dst/"
+            fi
+          }
+
+          copy_tree_if_exists "$INSTALL_DIR/bin" "$PACKAGE_DIR/bin"
+          copy_tree_if_exists "$INSTALL_DIR/lib" "$PACKAGE_DIR/lib"
+          copy_tree_if_exists "$INSTALL_DIR/include" "$PACKAGE_DIR/include"
+
+          while IFS= read -r binary; do
+            copy_if_exists "$binary" "$PACKAGE_DIR/bin/"
+          done < <(
+            find "$BUILD_DIR" -type f -executable \
+              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' \
+                 -o -name 'dnsdump' -o -name 'ares_queryloop' -o -name 'adig' -o -name 'ahost' \)
+          )
+
+          find "$BUILD_DIR" -type f \
+            \( -name 'libcares*.a' -o -name 'libcares*.so*' \) \
+            -exec cp -a {} "$PACKAGE_DIR/lib/" \;
+
+          copy_if_exists "$BUILD_DIR/compile_commands.json" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/CMakeCache.txt" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/coverage-summary.txt" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/cares.profdata" "$PACKAGE_DIR/build-info/"
+          copy_tree_if_exists "$BUILD_DIR/coverage-html" "$PACKAGE_DIR/coverage-html"
+          copy_if_exists "CARES_COMMIT.txt" "$PACKAGE_DIR/build-info/"
+
+          copy_tree_if_exists "c-ares/test/fuzzinput" "$PACKAGE_DIR/corpora/fuzzinput"
+          copy_tree_if_exists "c-ares/test/fuzznames" "$PACKAGE_DIR/corpora/fuzznames"
+
+          for src in \
+            c-ares/src/lib/ares_process.c \
+            c-ares/src/lib/ares_getaddrinfo.c \
+            c-ares/src/lib/ares_dns_record.c \
+            c-ares/src/lib/ares_parse_*.c \
+            c-ares/src/lib/ares_expand_name.c
+          do
+            for file in $src; do
+              copy_if_exists "$file" "$PACKAGE_DIR/source/"
+            done
+          done
+
+          cat > "$PACKAGE_DIR/RUN_ENV.sh" <<EOF
+          #!/usr/bin/env bash
+          HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+          export PATH="\$HERE/bin:\$PATH"
+          export LD_LIBRARY_PATH="\$HERE/lib:\${LD_LIBRARY_PATH:-}"
+          export LLVM_SYMBOLIZER_PATH="\${LLVM_SYMBOLIZER_PATH:-\$(command -v llvm-symbolizer 2>/dev/null || true)}"
+          EOF
+
+          case "${{ matrix.id }}" in
+            asan-ubsan)
+              cat >> "$PACKAGE_DIR/RUN_ENV.sh" <<'EOF'
+          export ASAN_OPTIONS="abort_on_error=1:halt_on_error=1:detect_leaks=1:strict_string_checks=1:symbolize=1"
+          export UBSAN_OPTIONS="abort_on_error=1:halt_on_error=1:print_stacktrace=1:symbolize=1"
+          EOF
+              ;;
+            msan)
+              cat >> "$PACKAGE_DIR/RUN_ENV.sh" <<'EOF'
+          export MSAN_OPTIONS="abort_on_error=1:halt_on_error=1:exit_code=86:track_origins=2:symbolize=1:print_stats=1"
+          EOF
+              ;;
+            tsan)
+              cat >> "$PACKAGE_DIR/RUN_ENV.sh" <<'EOF'
+          export TSAN_OPTIONS="abort_on_error=1:halt_on_error=1:second_deadlock_stack=1:history_size=7:symbolize=1"
+          EOF
+              ;;
+          esac
+
+          chmod +x "$PACKAGE_DIR/RUN_ENV.sh"
+
+          cat > "$PACKAGE_DIR/README_RUN.txt" <<EOF
+          c-ares security research build
+          Build: ${{ matrix.name }}
+          Commit: $(cat CARES_COMMIT.txt)
+
+          Usage:
+            source ./RUN_ENV.sh
+            ./bin/arestest
+
+          Bundled parser corpus drivers, when present:
+            ./bin/aresfuzz corpora/fuzzinput/*
+            ./bin/aresfuzzname corpora/fuzznames/*
+
+          Notes:
+          - MSan is most reliable when every dependency involved in the tested path is also MSan-instrumented.
+          - TSan is intended for threaded asynchronous/channel lifecycle testing.
+          - ASan+UBSan is the default build for malformed packet and parser PoCs.
+          EOF
+
+          find "$PACKAGE_DIR" -maxdepth 4 -type f | sort
+
+      - name: Create archive and checksum
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ARCHIVE="c-ares-${{ matrix.id }}-x86_64-linux.zip"
+          cd package
+          zip -r "../$ARCHIVE" "c-ares-${{ matrix.id }}"
+          cd ..
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-msan-x64-linux
+          name: c-ares-${{ matrix.id }}-x86_64-linux
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
+          compression-level: 0
           path: |
-            ffmpeg-msan-x64-linux.zip
-            ffmpeg-msan-x64-linux.zip.sha256
-            ffmpeg-msan-sendit-link.txt
+            c-ares-${{ matrix.id }}-x86_64-linux.zip
+            c-ares-${{ matrix.id }}-x86_64-linux.zip.sha256
