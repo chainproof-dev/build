@@ -1,14 +1,14 @@
-name: Build c-ares Security Research Targets
+name: Build libpcap Security Research Targets
 
 on:
   workflow_dispatch:
     inputs:
-      cares_ref:
-        description: "c-ares git ref, branch, tag, or commit"
+      pcap_ref:
+        description: "libpcap git ref, branch, tag, or commit"
         required: false
-        default: "main"
+        default: "master"
       run_tests:
-        description: "Run the c-ares test suite after building"
+        description: "Run the libpcap test suite after building"
         required: false
         type: boolean
         default: true
@@ -33,10 +33,6 @@ jobs:
               -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
               -fsanitize=address,undefined
               -fno-sanitize-recover=all
-            cxx_flags: >-
-              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
-              -fsanitize=address,undefined
-              -fno-sanitize-recover=all
             linker_flags: >-
               -fsanitize=address,undefined
             runtime_env: >-
@@ -51,26 +47,19 @@ jobs:
               -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
               -fsanitize=memory -fsanitize-memory-track-origins=2
               -fPIE
-            cxx_flags: >-
-              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
-              -fsanitize=memory -fsanitize-memory-track-origins=2
-              -fPIE
             linker_flags: >-
               -fsanitize=memory -fsanitize-memory-track-origins=2
               -fPIE -pie
             runtime_env: >-
               MSAN_OPTIONS=abort_on_error=1:halt_on_error=1:exit_code=86:track_origins=2:symbolize=1:print_stats=1
-            # GTest/libstdc++ from Ubuntu are not MSan-instrumented. Build and package
-            # the targets, but do not execute them automatically to avoid false positives.
+            # System libc and libssl are not MSan-instrumented; build the
+            # targets but do not auto-run them to avoid false positives.
             run_tests: false
 
           - name: ThreadSanitizer
             id: tsan
             build_type: Debug
             c_flags: >-
-              -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
-              -fsanitize=thread
-            cxx_flags: >-
               -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls
               -fsanitize=thread
             linker_flags: >-
@@ -85,23 +74,16 @@ jobs:
             c_flags: >-
               -O0 -g3 -fno-omit-frame-pointer
               -fprofile-instr-generate -fcoverage-mapping
-            cxx_flags: >-
-              -O0 -g3 -fno-omit-frame-pointer
-              -fprofile-instr-generate -fcoverage-mapping
             linker_flags: >-
               -fprofile-instr-generate -fcoverage-mapping
             runtime_env: >-
-              LLVM_PROFILE_FILE=cares-%p.profraw
+              LLVM_PROFILE_FILE=pcap-%p.profraw
             run_tests: true
 
           - name: Hardened RelWithDebInfo
             id: hardened
             build_type: RelWithDebInfo
             c_flags: >-
-              -O2 -g3 -fno-omit-frame-pointer
-              -fstack-protector-strong -D_FORTIFY_SOURCE=3
-              -fPIE -Wformat -Wformat-security -Werror=format-security
-            cxx_flags: >-
               -O2 -g3 -fno-omit-frame-pointer
               -fstack-protector-strong -D_FORTIFY_SOURCE=3
               -fPIE -Wformat -Wformat-security -Werror=format-security
@@ -115,18 +97,15 @@ jobs:
             build_type: Release
             c_flags: >-
               -O2 -g1 -fno-omit-frame-pointer
-            cxx_flags: >-
-              -O2 -g1 -fno-omit-frame-pointer
             linker_flags: ""
             runtime_env: ""
             run_tests: true
 
     env:
       CC: clang
-      CXX: clang++
       BUILD_DIR: build-${{ matrix.id }}
       INSTALL_DIR: install-${{ matrix.id }}
-      PACKAGE_DIR: package/c-ares-${{ matrix.id }}
+      PACKAGE_DIR: package/libpcap-${{ matrix.id }}
 
     steps:
       - name: Install dependencies
@@ -137,7 +116,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git build-essential clang llvm lld cmake ninja-build \
-            pkg-config libc-ares-dev libgtest-dev libgmock-dev googletest \
+            pkg-config flex bison \
+            libssl-dev zlib1g-dev \
             python3 zip file ca-certificates
 
           clang --version
@@ -145,37 +125,16 @@ jobs:
           ninja --version
           llvm-symbolizer --version
 
-      - name: Build GoogleTest and GoogleMock
+      - name: Clone libpcap
         shell: bash
         run: |
           set -euxo pipefail
 
-          # Ubuntu may expose GTestConfig.cmake without the GTest::gmock target.
-          # Build and install the packaged googletest sources into /usr/local,
-          # then explicitly pass that config directory to c-ares.
-          sudo rm -rf /tmp/googletest-build
-          sudo cmake -S /usr/src/googletest -B /tmp/googletest-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DBUILD_GMOCK=ON \
-            -DINSTALL_GTEST=ON
-          sudo cmake --build /tmp/googletest-build --parallel "$(nproc)"
-          sudo cmake --install /tmp/googletest-build
-          sudo ldconfig
-
-          test -f /usr/local/lib/cmake/GTest/GTestConfig.cmake
-          grep -R "GTest::gmock" /usr/local/lib/cmake/GTest
-
-      - name: Clone c-ares
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          git clone https://github.com/c-ares/c-ares.git c-ares
-          cd c-ares
-          git checkout "${{ inputs.cares_ref }}"
+          git clone https://github.com/the-tcpdump-group/libpcap.git libpcap
+          cd libpcap
+          git checkout "${{ inputs.pcap_ref }}"
           git submodule update --init --recursive
-          git rev-parse HEAD | tee ../CARES_COMMIT.txt
+          git rev-parse HEAD | tee ../PCAP_COMMIT.txt
           git status --short
 
       - name: Configure ${{ matrix.name }}
@@ -183,28 +142,19 @@ jobs:
         run: |
           set -euxo pipefail
 
-          cmake -S c-ares -B "$BUILD_DIR" -G Ninja \
+          cmake -S libpcap -B "$BUILD_DIR" -G Ninja \
             -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
             -DCMAKE_INSTALL_PREFIX="$PWD/$INSTALL_DIR" \
             -DCMAKE_C_COMPILER="$CC" \
-            -DCMAKE_CXX_COMPILER="$CXX" \
-            -DGTest_DIR=/usr/local/lib/cmake/GTest \
-            -DCMAKE_PREFIX_PATH=/usr/local \
             -DCMAKE_C_FLAGS="${{ matrix.c_flags }}" \
-            -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}" \
             -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.linker_flags }}" \
-            -DCARES_STATIC=ON \
-            -DCARES_SHARED=ON \
-            -DCARES_STATIC_PIC=ON \
-            -DCARES_BUILD_TESTS=ON \
-            -DCARES_BUILD_TOOLS=ON \
-            -DCARES_THREADS=ON \
-            -DCARES_WERROR=OFF \
-            -DCARES_COVERAGE=OFF \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTING=ON \
+            -DENABLE_REMOTE=OFF \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-      - name: Build library, tools, tests, and fuzz drivers
+      - name: Build library and test programs
         shell: bash
         run: |
           set -euxo pipefail
@@ -234,7 +184,7 @@ jobs:
 
           mapfile -t candidates < <(
             find "$BUILD_DIR" -type f -executable \
-              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' -o -name 'adig' -o -name 'ahost' \)
+              \( -name 'filtertest' -o -name 'findalldevstest' -o -name 'opentest' \)
           )
 
           if [ "${#candidates[@]}" -eq 0 ]; then
@@ -253,7 +203,7 @@ jobs:
 
           test "$verified" -eq 1
 
-      - name: Run tests and bundled fuzz corpora
+      - name: Run test suite
         if: inputs.run_tests && matrix.run_tests
         shell: bash
         run: |
@@ -262,7 +212,6 @@ jobs:
           export PATH="/usr/lib/llvm-18/bin:$PATH"
           export LLVM_SYMBOLIZER_PATH="$(command -v llvm-symbolizer)"
 
-          # Convert the matrix runtime string into exported KEY=VALUE pairs.
           while IFS= read -r assignment; do
             [ -z "$assignment" ] && continue
             export "$assignment"
@@ -285,11 +234,11 @@ jobs:
             exit 1
           fi
 
-          llvm-profdata merge -sparse "${profiles[@]}" -o "$BUILD_DIR/cares.profdata"
+          llvm-profdata merge -sparse "${profiles[@]}" -o "$BUILD_DIR/pcap.profdata"
 
           mapfile -t objects < <(
             find "$BUILD_DIR" -type f -executable \
-              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' -o -name 'adig' -o -name 'ahost' \)
+              \( -name 'filtertest' -o -name 'findalldevstest' -o -name 'opentest' \)
           )
 
           if [ "${#objects[@]}" -eq 0 ]; then
@@ -304,15 +253,15 @@ jobs:
           done
 
           llvm-cov report "$primary_object" "${object_args[@]}" \
-            -instr-profile="$BUILD_DIR/cares.profdata" \
-            -ignore-filename-regex='(test|third_party|CMakeFiles)' \
+            -instr-profile="$BUILD_DIR/pcap.profdata" \
+            -ignore-filename-regex='(testprogs|CMakeFiles)' \
             | tee "$BUILD_DIR/coverage-summary.txt"
 
           llvm-cov show "$primary_object" "${object_args[@]}" \
-            -instr-profile="$BUILD_DIR/cares.profdata" \
+            -instr-profile="$BUILD_DIR/pcap.profdata" \
             -format=html \
             -output-dir="$BUILD_DIR/coverage-html" \
-            -ignore-filename-regex='(test|third_party|CMakeFiles)'
+            -ignore-filename-regex='(testprogs|CMakeFiles)'
 
       - name: Install build
         shell: bash
@@ -325,7 +274,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          mkdir -p "$PACKAGE_DIR"/{bin,lib,include,build-info,corpora,source}
+          mkdir -p "$PACKAGE_DIR"/{bin,lib,include,build-info,source}
 
           copy_if_exists() {
             local src="$1"
@@ -348,38 +297,38 @@ jobs:
           copy_tree_if_exists "$INSTALL_DIR/lib" "$PACKAGE_DIR/lib"
           copy_tree_if_exists "$INSTALL_DIR/include" "$PACKAGE_DIR/include"
 
+          # Copy instrumented test programs that aren't installed by default
           while IFS= read -r binary; do
             copy_if_exists "$binary" "$PACKAGE_DIR/bin/"
           done < <(
             find "$BUILD_DIR" -type f -executable \
-              \( -name 'arestest' -o -name 'aresfuzz' -o -name 'aresfuzzname' \
-                 -o -name 'dnsdump' -o -name 'ares_queryloop' -o -name 'adig' -o -name 'ahost' \)
+              \( -name 'filtertest' -o -name 'findalldevstest' -o -name 'opentest' \
+                 -o -name 'selpolltest' -o -name 'threadstest' -o -name 'listDataLinks' \)
           )
 
           find "$BUILD_DIR" -type f \
-            \( -name 'libcares*.a' -o -name 'libcares*.so*' \) \
+            \( -name 'libpcap*.a' -o -name 'libpcap*.so*' \) \
             -exec cp -a {} "$PACKAGE_DIR/lib/" \;
 
           copy_if_exists "$BUILD_DIR/compile_commands.json" "$PACKAGE_DIR/build-info/"
           copy_if_exists "$BUILD_DIR/CMakeCache.txt" "$PACKAGE_DIR/build-info/"
           copy_if_exists "$BUILD_DIR/coverage-summary.txt" "$PACKAGE_DIR/build-info/"
-          copy_if_exists "$BUILD_DIR/cares.profdata" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "$BUILD_DIR/pcap.profdata" "$PACKAGE_DIR/build-info/"
           copy_tree_if_exists "$BUILD_DIR/coverage-html" "$PACKAGE_DIR/coverage-html"
-          copy_if_exists "CARES_COMMIT.txt" "$PACKAGE_DIR/build-info/"
+          copy_if_exists "PCAP_COMMIT.txt" "$PACKAGE_DIR/build-info/"
 
-          copy_tree_if_exists "c-ares/test/fuzzinput" "$PACKAGE_DIR/corpora/fuzzinput"
-          copy_tree_if_exists "c-ares/test/fuzznames" "$PACKAGE_DIR/corpora/fuzznames"
-
+          # Key security-relevant source files
           for src in \
-            c-ares/src/lib/ares_process.c \
-            c-ares/src/lib/ares_getaddrinfo.c \
-            c-ares/src/lib/ares_dns_record.c \
-            c-ares/src/lib/ares_parse_*.c \
-            c-ares/src/lib/ares_expand_name.c
+            libpcap/gencode.c \
+            libpcap/optimize.c \
+            libpcap/grammar.y \
+            libpcap/scanner.l \
+            libpcap/sf-pcap.c \
+            libpcap/pcap.c \
+            libpcap/pcap-bpf.c \
+            libpcap/pcap-linux.c
           do
-            for file in $src; do
-              copy_if_exists "$file" "$PACKAGE_DIR/source/"
-            done
+            copy_if_exists "$src" "$PACKAGE_DIR/source/"
           done
 
           cat > "$PACKAGE_DIR/RUN_ENV.sh" <<EOF
@@ -412,22 +361,35 @@ jobs:
           chmod +x "$PACKAGE_DIR/RUN_ENV.sh"
 
           cat > "$PACKAGE_DIR/README_RUN.txt" <<EOF
-          c-ares security research build
+          libpcap security research build
           Build: ${{ matrix.name }}
-          Commit: $(cat CARES_COMMIT.txt)
+          Commit: $(cat PCAP_COMMIT.txt)
 
           Usage:
             source ./RUN_ENV.sh
-            ./bin/arestest
 
-          Bundled parser corpus drivers, when present:
-            ./bin/aresfuzz corpora/fuzzinput/*
-            ./bin/aresfuzzname corpora/fuzznames/*
+          BPF filter compiler (primary research target — exercises gencode.c / grammar.y):
+            ./bin/filtertest "tcp and dst port 80"
+            ./bin/filtertest "ip[2:2] > 100"
+            ./bin/filtertest "(((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0)"
+
+          Device enumeration and open tests (requires CAP_NET_RAW or pcap file path):
+            ./bin/findalldevstest
+            ./bin/opentest <interface-or-file>
+
+          pcap file parser (offline — no privileges needed):
+            Write a custom harness that calls pcap_open_offline() against crafted .pcap inputs.
+            Generate corpus with scapy or hand-craft files starting from the 4-byte magic:
+              little-endian: d4 c3 b2 a1 (classic pcap)
+              big-endian:    a1 b2 c3 d4
+              pcapng:        0a 0d 0d 0a
 
           Notes:
-          - MSan is most reliable when every dependency involved in the tested path is also MSan-instrumented.
-          - TSan is intended for threaded asynchronous/channel lifecycle testing.
-          - ASan+UBSan is the default build for malformed packet and parser PoCs.
+          - filtertest is the recommended entry point for BPF compiler (pcap_compile) research.
+          - MSan builds are not auto-tested; system libc/libssl are not MSan-instrumented.
+          - ASan+UBSan is the recommended starting point for both BPF and file-parser PoCs.
+          - Wire filtertest or a custom pcap_open_offline harness into AFL++ or libFuzzer for
+            automated discovery; use -DBUILD_SHARED_LIBS=OFF for a self-contained fuzz target.
           EOF
 
           find "$PACKAGE_DIR" -maxdepth 4 -type f | sort
@@ -437,9 +399,9 @@ jobs:
         run: |
           set -euxo pipefail
 
-          ARCHIVE="c-ares-${{ matrix.id }}-x86_64-linux.zip"
+          ARCHIVE="libpcap-${{ matrix.id }}-x86_64-linux.zip"
           cd package
-          zip -r "../$ARCHIVE" "c-ares-${{ matrix.id }}"
+          zip -r "../$ARCHIVE" "libpcap-${{ matrix.id }}"
           cd ..
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
           ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
@@ -447,10 +409,10 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: c-ares-${{ matrix.id }}-x86_64-linux
+          name: libpcap-${{ matrix.id }}-x86_64-linux
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
           path: |
-            c-ares-${{ matrix.id }}-x86_64-linux.zip
-            c-ares-${{ matrix.id }}-x86_64-linux.zip.sha256
+            libpcap-${{ matrix.id }}-x86_64-linux.zip
+            libpcap-${{ matrix.id }}-x86_64-linux.zip.sha256
