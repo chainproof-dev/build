@@ -52,16 +52,16 @@ jobs:
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_INSTALL_PREFIX="$PWD/msan-runtime" \
-            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
             -DLIBCXX_USE_COMPILER_RT=ON \
             -DLIBCXXABI_USE_COMPILER_RT=ON \
-            -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
             -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
             -DCMAKE_CXX_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=memory" \
             -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=memory"
 
-          cmake --build build/msan-runtime --parallel "$(nproc)" --target cxx cxxabi unwind
+          cmake --build build/msan-runtime --parallel "$(nproc)" --target cxx cxxabi
           cmake --install build/msan-runtime
 
       - name: Configure MSan
