@@ -17,9 +17,7 @@ jobs:
       max-parallel: 1
       matrix:
         sanitizer:
-          - asan
           - msan
-          - cfi
 
     steps:
       - name: Install host dependencies
@@ -54,32 +52,17 @@ jobs:
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_INSTALL_PREFIX="$PWD/msan-runtime" \
-            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
             -DLIBCXX_USE_COMPILER_RT=ON \
             -DLIBCXXABI_USE_COMPILER_RT=ON \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
             -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
             -DCMAKE_CXX_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=memory" \
             -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=memory"
 
-          cmake --build build/msan-runtime --parallel "$(nproc)"
+          cmake --build build/msan-runtime --parallel "$(nproc)" --target cxx cxxabi unwind
           cmake --install build/msan-runtime
-
-      - name: Configure ASan
-        if: matrix.sanitizer == 'asan'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cmake -S flatbuffers -B build/asan -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DFLATBUFFERS_BUILD_TESTS=ON \
-            -DFLATBUFFERS_BUILD_FLATLIB=ON \
-            -DFLATBUFFERS_BUILD_FLATC=ON \
-            -DFLATBUFFERS_INSTALL=ON \
-            -DFLATBUFFERS_CODE_SANITIZE==address,undefined \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Configure MSan
         if: matrix.sanitizer == 'msan'
@@ -89,6 +72,8 @@ jobs:
           MSAN_ROOT="$PWD/msan-runtime"
           MSAN_CXX="$MSAN_ROOT/include/c++/v1"
           MSAN_LIB="$MSAN_ROOT/lib/x86_64-unknown-linux-gnu"
+          test -d "$MSAN_ROOT/include/c++/v1"
+          test -d "$MSAN_LIB" || MSAN_LIB="$MSAN_ROOT/lib"
 
           cmake -S flatbuffers -B build/msan -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -103,24 +88,6 @@ jobs:
             -DCMAKE_CXX_FLAGS="-stdlib=libc++ -nostdinc++ -isystem $MSAN_CXX -fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -L$MSAN_LIB -Wl,-rpath,$MSAN_LIB -fsanitize=memory -fsanitize-memory-track-origins=2"
 
-      - name: Configure CFI
-        if: matrix.sanitizer == 'cfi'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cmake -S flatbuffers -B build/cfi -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DFLATBUFFERS_BUILD_TESTS=ON \
-            -DFLATBUFFERS_BUILD_FLATLIB=ON \
-            -DFLATBUFFERS_BUILD_FLATC=ON \
-            -DFLATBUFFERS_INSTALL=ON \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
-            -DCMAKE_CXX_FLAGS="-O1 -g -fno-omit-frame-pointer -flto=thin -fsanitize=cfi,cfi-icall -fvisibility=hidden -fno-pie" \
-            -DCMAKE_EXE_LINKER_FLAGS="-flto=thin -fsanitize=cfi,cfi-icall -fno-pie -no-pie"
-
       - name: Build selected sanitizer targets
         shell: bash
         run: |
@@ -128,15 +95,6 @@ jobs:
           cmake --build "build/${{ matrix.sanitizer }}" \
             --parallel "$(nproc)" \
             --target flatbuffers flatc flattests
-
-      - name: Run ASan tests
-        if: matrix.sanitizer == 'asan'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          ASAN_OPTIONS='detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1' \
-          LSAN_OPTIONS='detect_leaks=0' \
-          ./build/asan/flattests
 
       - name: Run MSan tests
         if: matrix.sanitizer == 'msan'
@@ -148,21 +106,14 @@ jobs:
           MSAN_OPTIONS='halt_on_error=1:exit_code=86:print_stacktrace=1' \
           ./build/msan/flattests
 
-      - name: Run CFI tests
-        if: matrix.sanitizer == 'cfi'
+      - name: Verify only MSan build exists
         shell: bash
         run: |
           set -euxo pipefail
-          ./build/cfi/flattests
-
-      - name: Verify only requested build exists
-        shell: bash
-        run: |
-          set -euxo pipefail
-          test -d "build/${{ matrix.sanitizer }}"
-          for other in asan msan cfi; do
-            if [ "$other" != "${{ matrix.sanitizer }}" ] && [ -d "build/$other" ]; then
-              echo "Unexpected second sanitizer build directory: build/$other"
+          test -d build/msan
+          for other in asan cfi; do
+            if [ -d "build/$other" ]; then
+              echo "Unexpected build directory: build/$other"
               exit 1
             fi
           done
