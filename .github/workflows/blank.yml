@@ -1,10 +1,10 @@
-name: Build FFmpeg Security Runtimes
+name: Build FlatBuffers Security Runtimes
 
 on:
   workflow_dispatch:
     inputs:
-      ffmpeg_ref:
-        description: "FFmpeg git ref, branch, tag, or commit"
+      flatbuffers_ref:
+        description: "FlatBuffers git ref, branch, tag, or commit"
         required: false
         default: "master"
 
@@ -18,59 +18,75 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Production-style build: keep FlatBuffers' CMake defaults intact.
+          # CMAKE_BUILD_TYPE=Release provides optimized, non-debug production
+          # binaries while leaving the project's default FLATBUFFERS_* options
+          # unchanged.
           - name: release
             cc: gcc
             cxx: g++
-            configure_extra: "--disable-stripping --enable-debug=2"
-            cflags: "-O2 -g -fno-omit-frame-pointer"
-            ldflags: ""
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: ""
+            build_type: Release
+            configure_extra: ""
+            cxx_flags: ""
+            exe_ldflags: ""
+            essential_targets: "flatbuffers flatc flattests"
+            optional_targets: "flatsamplebinary flatsampletext flatsamplebfbs"
+            run_tests: "true"
 
-          - name: debug
-            cc: gcc
-            cxx: g++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations"
-            cflags: "-O0 -g3 -fno-omit-frame-pointer"
-            ldflags: ""
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: ""
-
-          - name: asan-ubsan
+          - name: asan
             cc: clang
             cxx: clang++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
-            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: "tests/videogen tools/target_dem_fuzzer"
-
-          - name: ubsan-strict
-            cc: clang
-            cxx: clang++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --cc=clang --cxx=clang++"
-            cflags: "-O1 -g3 -fno-omit-frame-pointer -fsanitize=undefined,signed-integer-overflow,float-cast-overflow -fno-sanitize-recover=all"
-            ldflags: "-fsanitize=undefined,signed-integer-overflow,float-cast-overflow"
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: "tests/videogen"
-
-          - name: shared-dev
-            cc: gcc
-            cxx: g++
-            configure_extra: "--disable-stripping --enable-shared --disable-static --enable-debug=2"
-            cflags: "-O1 -g3 -fno-omit-frame-pointer"
-            ldflags: ""
-            essential_targets: "ffmpeg ffprobe"
+            build_type: RelWithDebInfo
+            configure_extra: "-DFLATBUFFERS_CODE_SANITIZE==address"
+            cxx_flags: ""
+            exe_ldflags: ""
+            essential_targets: "flatbuffers flatc flattests"
             optional_targets: ""
+            run_tests: "true"
 
-          - name: fate-tools-asan
+          - name: ubsan
             cc: clang
             cxx: clang++
-            configure_extra: "--disable-stripping --enable-debug=3 --disable-optimizations --toolchain=clang-asan"
-            cflags: "-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            ldflags: "-fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow"
-            essential_targets: "ffmpeg ffprobe"
-            optional_targets: "tests/videogen tools/target_dem_fuzzer"
+            build_type: RelWithDebInfo
+            configure_extra: "-DFLATBUFFERS_CODE_SANITIZE==undefined"
+            cxx_flags: "-fno-sanitize-recover=undefined"
+            exe_ldflags: "-fno-sanitize-recover=undefined"
+            essential_targets: "flatbuffers flatc flattests"
+            optional_targets: ""
+            run_tests: "true"
+
+          - name: msan
+            cc: clang
+            cxx: clang++
+            build_type: RelWithDebInfo
+            configure_extra: "-DFLATBUFFERS_CODE_SANITIZE==memory -DFLATBUFFERS_CXX_FLAGS=-fsanitize-memory-track-origins=2"
+            cxx_flags: "-stdlib=libc++"
+            exe_ldflags: "-stdlib=libc++"
+            essential_targets: "flatbuffers flatc flattests"
+            optional_targets: ""
+            run_tests: "true"
+
+          - name: tsan
+            cc: clang
+            cxx: clang++
+            build_type: RelWithDebInfo
+            configure_extra: "-DFLATBUFFERS_CODE_SANITIZE==thread"
+            cxx_flags: ""
+            exe_ldflags: ""
+            essential_targets: "flatbuffers flatc flattests"
+            optional_targets: ""
+            run_tests: "true"
+
+          - name: cfi
+            cc: clang
+            cxx: clang++
+            build_type: RelWithDebInfo
+            configure_extra: "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON"
+            cxx_flags: "-O1 -g -fno-omit-frame-pointer -flto=thin -fsanitize=cfi,cfi-icall -fvisibility=hidden"
+            exe_ldflags: "-flto=thin -fsanitize=cfi,cfi-icall"
+            essential_targets: "flatbuffers flatc flattests"
+            optional_targets: ""
+            run_tests: "true"
 
     steps:
       - name: Install dependencies
@@ -80,46 +96,57 @@ jobs:
 
           sudo apt-get update
           sudo apt-get install -y \
-            git build-essential clang lld pkg-config yasm nasm \
-            zlib1g-dev libssl-dev libxml2-dev zip curl python3 ca-certificates \
-            file xz-utils
+            git build-essential cmake ninja-build clang lld \
+            libc++-dev libc++abi-dev \
+            pkg-config zip curl ca-certificates file
 
-      - name: Clone FFmpeg
+      - name: Clone FlatBuffers
         shell: bash
         run: |
           set -euxo pipefail
 
-          git clone https://github.com/FFmpeg/FFmpeg.git ffmpeg
-          cd ffmpeg
-          git checkout "${{ github.event.inputs.ffmpeg_ref }}"
-          git rev-parse HEAD | tee ../FFMPEG_COMMIT.txt
+          git clone https://github.com/google/flatbuffers.git flatbuffers
+          cd flatbuffers
+          git checkout "${{ github.event.inputs.flatbuffers_ref }}"
+          git rev-parse HEAD | tee ../FLATBUFFERS_COMMIT.txt
           git status --short
 
-      - name: Configure FFmpeg
+      - name: Configure FlatBuffers
         shell: bash
-        working-directory: ffmpeg
+        working-directory: flatbuffers
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
           CONFIGURE_EXTRA: ${{ matrix.configure_extra }}
-          CFLAGS_EXTRA: ${{ matrix.cflags }}
-          LDFLAGS_EXTRA: ${{ matrix.ldflags }}
+          CXX_FLAGS_EXTRA: ${{ matrix.cxx_flags }}
+          EXE_LDFLAGS_EXTRA: ${{ matrix.exe_ldflags }}
         run: |
           set -euxo pipefail
 
-          mkdir -p "../out/${{ matrix.name }}"
+          mkdir -p "../build/${{ matrix.name }}"
 
           read -r -a CFG_ARGS <<< "$CONFIGURE_EXTRA"
 
           CMD=(
-            ./configure
-            --prefix="$PWD/../out/${{ matrix.name }}"
+            cmake
+            -S .
+            -B "../build/${{ matrix.name }}"
+            -G Ninja
+            "-DCMAKE_BUILD_TYPE=${{ matrix.build_type }}"
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+            -DFLATBUFFERS_BUILD_TESTS=ON
+            -DFLATBUFFERS_BUILD_FLATLIB=ON
+            -DFLATBUFFERS_BUILD_FLATC=ON
+            -DFLATBUFFERS_INSTALL=ON
             "${CFG_ARGS[@]}"
-            --extra-cflags="$CFLAGS_EXTRA"
           )
 
-          if [ -n "$LDFLAGS_EXTRA" ]; then
-            CMD+=(--extra-ldflags="$LDFLAGS_EXTRA")
+          if [ -n "$CXX_FLAGS_EXTRA" ]; then
+            CMD+=("-DCMAKE_CXX_FLAGS=$CXX_FLAGS_EXTRA")
+          fi
+
+          if [ -n "$EXE_LDFLAGS_EXTRA" ]; then
+            CMD+=("-DCMAKE_EXE_LINKER_FLAGS=$EXE_LDFLAGS_EXTRA")
           fi
 
           echo "[+] Configure command:"
@@ -130,20 +157,17 @@ jobs:
 
       - name: Build essential targets
         shell: bash
-        working-directory: ffmpeg
+        working-directory: flatbuffers
         run: |
           set -euxo pipefail
 
           echo "[+] Building essential targets: ${{ matrix.essential_targets }}"
-
-          for target in ${{ matrix.essential_targets }}; do
-            echo "[+] make $target"
-            make -j"$(nproc)" "$target"
-          done
+          cmake --build "../build/${{ matrix.name }}" --parallel "$(nproc)" \
+            --target ${{ matrix.essential_targets }}
 
       - name: Build optional targets
         shell: bash
-        working-directory: ffmpeg
+        working-directory: flatbuffers
         run: |
           set -uxo pipefail
 
@@ -151,46 +175,38 @@ jobs:
 
           for target in ${{ matrix.optional_targets }}; do
             echo "[+] Trying optional target: $target"
-            if make -j"$(nproc)" "$target"; then
+            if cmake --build "../build/${{ matrix.name }}" --parallel "$(nproc)" --target "$target"; then
               echo "[OK] Built optional target: $target"
             else
               echo "[WARN] Optional target failed or does not exist: $target"
             fi
           done
 
-          if echo "${{ matrix.optional_targets }}" | grep -q "tests/videogen"; then
-            if [ ! -x tests/videogen ]; then
-              echo "[WARN] tests/videogen missing. Trying manual fallback compile."
-
-              if echo "${{ matrix.name }}" | grep -Eq "asan|ubsan"; then
-                ${{ matrix.cc }} \
-                  -O0 -g3 -fno-omit-frame-pointer \
-                  -fsanitize=address,undefined,signed-integer-overflow,float-cast-overflow \
-                  -I. -I./ \
-                  -o tests/videogen \
-                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
-              else
-                ${{ matrix.cc }} \
-                  -O0 -g3 -fno-omit-frame-pointer \
-                  -I. -I./ \
-                  -o tests/videogen \
-                  tests/videogen.c -lm || echo "[WARN] manual videogen fallback failed"
-              fi
-            fi
-          fi
-
-      - name: Install FFmpeg
+      - name: Run FlatBuffers tests
+        if: matrix.run_tests == 'true'
         shell: bash
-        working-directory: ffmpeg
+        working-directory: flatbuffers
         run: |
-          set -uxo pipefail
+          set -euxo pipefail
 
-          echo "[+] Running make install"
-          if make install; then
-            echo "[OK] make install succeeded"
+          TEST_BIN="../build/${{ matrix.name }}/flattests"
+          if [ -x "$TEST_BIN" ]; then
+            echo "[+] Running flattests"
+            "$TEST_BIN"
           else
-            echo "[WARN] make install failed. Packaging will continue from build tree."
+            echo "[ERROR] flattests was not built: $TEST_BIN"
+            exit 1
           fi
+
+      - name: Install FlatBuffers
+        shell: bash
+        working-directory: flatbuffers
+        run: |
+          set -euxo pipefail
+
+          DEST="$PWD/../package/${{ matrix.name }}/install"
+          mkdir -p "$DEST"
+          cmake --install "../build/${{ matrix.name }}" --prefix "$DEST"
 
       - name: Collect build files safely
         shell: bash
@@ -198,7 +214,8 @@ jobs:
           set -euxo pipefail
 
           PKG="package/${{ matrix.name }}"
-          PREFIX="$PWD/out/${{ matrix.name }}"
+          BUILD="build/${{ matrix.name }}"
+          PREFIX="$PKG/install"
 
           mkdir -p "$PKG/bin" "$PKG/lib" "$PKG/include" "$PKG/build-info" "$PKG/src-snippets"
 
@@ -227,85 +244,72 @@ jobs:
             fi
           }
 
-          copy_if_exists "ffmpeg/ffmpeg" "$PKG/bin/"
-          copy_if_exists "ffmpeg/ffprobe" "$PKG/bin/"
-          copy_if_exists "ffmpeg/ffplay" "$PKG/bin/"
-          copy_if_exists "ffmpeg/tests/videogen" "$PKG/bin/"
-          copy_if_exists "ffmpeg/tools/target_dem_fuzzer" "$PKG/bin/"
+          copy_if_exists "$BUILD/flatc" "$PKG/bin/"
+          copy_if_exists "$BUILD/flattests" "$PKG/bin/"
+          copy_if_exists "$BUILD/flatsamplebinary" "$PKG/bin/"
+          copy_if_exists "$BUILD/flatsampletext" "$PKG/bin/"
+          copy_if_exists "$BUILD/flatsamplebfbs" "$PKG/bin/"
 
-          copy_if_exists "$PREFIX/bin/ffmpeg" "$PKG/bin/"
-          copy_if_exists "$PREFIX/bin/ffprobe" "$PKG/bin/"
-          copy_if_exists "$PREFIX/bin/ffplay" "$PKG/bin/"
-
+          copy_if_exists "$PREFIX/bin/flatc" "$PKG/bin/"
           copy_dir_if_exists "$PREFIX/lib" "$PKG/lib"
           copy_dir_if_exists "$PREFIX/include" "$PKG/include"
+          copy_dir_if_exists "$PREFIX/lib/cmake" "$PKG/lib/cmake"
 
-          for lib in \
-            ffmpeg/libavutil/libavutil.a \
-            ffmpeg/libavcodec/libavcodec.a \
-            ffmpeg/libavformat/libavformat.a \
-            ffmpeg/libavdevice/libavdevice.a \
-            ffmpeg/libavfilter/libavfilter.a \
-            ffmpeg/libswscale/libswscale.a \
-            ffmpeg/libswresample/libswresample.a
-          do
-            copy_if_exists "$lib" "$PKG/lib/"
-          done
-
-          copy_if_exists "ffmpeg/config.h" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/config.log" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/ffbuild/config.log" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/ffbuild/config.mak" "$PKG/build-info/"
-          copy_if_exists "ffmpeg/ffbuild/config.sh" "$PKG/build-info/"
-          copy_if_exists "FFMPEG_COMMIT.txt" "$PKG/build-info/"
+          copy_if_exists "FLATBUFFERS_COMMIT.txt" "$PKG/build-info/"
+          copy_if_exists "flatbuffers/CMakeCache.txt" "$PKG/build-info/"
+          copy_if_exists "$BUILD/CMakeCache.txt" "$PKG/build-info/"
+          copy_if_exists "$BUILD/compile_commands.json" "$PKG/build-info/"
 
           for src in \
-            ffmpeg/libavformat/http.c \
-            ffmpeg/libavformat/rtsp.c \
-            ffmpeg/libavformat/mov.c \
-            ffmpeg/libavformat/concatdec.c \
-            ffmpeg/libavformat/id3v2.c \
-            ffmpeg/libavformat/omadec.c \
-            ffmpeg/libavformat/matroskadec.c \
-            ffmpeg/libavutil/rc4.c \
-            ffmpeg/libavutil/blowfish.c \
-            ffmpeg/libavutil/aes_ctr.c \
-            ffmpeg/tests/videogen.c \
-            ffmpeg/tests/utils.c
-          do
+            flatbuffers/CMakeLists.txt \
+            flatbuffers/CMake/Version.cmake \
+            flatbuffers/tests/fuzzer/CMakeLists.txt \
+            flatbuffers/src/flatc.cpp \
+            flatbuffers/src/flatc_main.cpp \
+            flatbuffers/src/idl_parser.cpp \
+            flatbuffers/src/idl_gen_cpp.cpp \
+            flatbuffers/include/flatbuffers/flatbuffers.h \
+            flatbuffers/include/flatbuffers/verifier.h; do
             copy_if_exists "$src" "$PKG/src-snippets/"
           done
 
-          cat > "$PKG/RUN_ENV.sh" <<'EOF'
+          cat > "$PKG/RUN_ENV.sh" <<'RUNEOF'
           #!/usr/bin/env bash
           HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"
-          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:symbolize=1:allocator_may_return_null=1
-          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
           export PATH="$HERE/bin:$PATH"
-          EOF
+          export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"
+          export ASAN_OPTIONS="abort_on_error=1:halt_on_error=1:symbolize=1:allocator_may_return_null=1"
+          export TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1"
+          export MSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+          RUNEOF
 
           chmod +x "$PKG/RUN_ENV.sh"
 
-          cat > "$PKG/README_RUN.txt" <<EOF
+          cat > "$PKG/README_RUN.txt" <<EOF_README
           Build: ${{ matrix.name }}
-          Commit: $(cat FFMPEG_COMMIT.txt 2>/dev/null || echo unknown)
+          Ref: ${{ github.event.inputs.flatbuffers_ref }}
+          Commit: $(cat FLATBUFFERS_COMMIT.txt 2>/dev/null || echo unknown)
+          Build type: ${{ matrix.build_type }}
+          Compiler: ${{ matrix.cc }} / ${{ matrix.cxx }}
 
           Usage:
             cd ${{ matrix.name }}
             source ./RUN_ENV.sh
-            ./bin/ffmpeg -version
-            ./bin/ffprobe -version
+            ./bin/flatc --version
+            ./bin/flattests
 
-          Common tests:
-            ./bin/ffprobe -v trace poc.oma
-            ./bin/ffprobe -v trace matroska_nan.mkv
-            ./bin/ffprobe -v error cmov_oom.mp4
-            ./bin/videogen /tmp/out.yuv 65536 65536
-          EOF
+          Build directory:
+            ${BUILD}
+
+          Notes:
+            - The release build intentionally leaves FlatBuffers' CMake feature defaults unchanged.
+            - The MSan build uses libc++, but meaningful MSan results require an MSan-instrumented C++ standard library and runtime dependencies.
+            - The CFI build uses Clang LTO and CFI for indirect-call and virtual-call checking.
+          EOF_README
 
           echo "[+] Packaged files:"
-          find "$PKG" -maxdepth 4 -type f | sort
+          find "$PKG" -maxdepth 5 -type f | sort
 
           echo "[+] Binary file info:"
           find "$PKG/bin" -maxdepth 1 -type f -exec file {} \; || true
@@ -315,7 +319,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
+          ZIP="flatbuffers-${{ matrix.name }}-x64-linux.zip"
 
           cd package
           zip -r "../$ZIP" "${{ matrix.name }}"
@@ -330,13 +334,12 @@ jobs:
         run: |
           set -uxo pipefail
 
-          ZIP="ffmpeg-${{ matrix.name }}-x64-linux.zip"
-          LINK_FILE="ffmpeg-${{ matrix.name }}-sendit-link.txt"
+          ZIP="flatbuffers-${{ matrix.name }}-x64-linux.zip"
+          LINK_FILE="flatbuffers-${{ matrix.name }}-sendit-link.txt"
 
           echo "[+] Uploading $ZIP to sendit.sh"
 
           LINK=""
-
           for i in 1 2 3 4 5; do
             echo "[+] Upload attempt $i"
 
@@ -364,10 +367,10 @@ jobs:
       - name: Upload GitHub artifact backup
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-${{ matrix.name }}-x64-linux
+          name: flatbuffers-${{ matrix.name }}-x64-linux
           if-no-files-found: error
           retention-days: 7
           path: |
-            ffmpeg-${{ matrix.name }}-x64-linux.zip
-            ffmpeg-${{ matrix.name }}-x64-linux.zip.sha256
-            ffmpeg-${{ matrix.name }}-sendit-link.txt
+            flatbuffers-${{ matrix.name }}-x64-linux.zip
+            flatbuffers-${{ matrix.name }}-x64-linux.zip.sha256
+            flatbuffers-${{ matrix.name }}-sendit-link.txt
