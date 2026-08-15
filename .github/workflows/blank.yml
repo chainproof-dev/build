@@ -56,8 +56,8 @@ jobs:
             -DLIBCXX_USE_COMPILER_RT=ON \
             -DLIBCXXABI_USE_COMPILER_RT=ON \
             -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
-            -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
-            -DCMAKE_CXX_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
+            -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2 -Wno-user-defined-literals -Wno-error=user-defined-literals" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2 -Wno-user-defined-literals -Wno-error=user-defined-literals" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=memory" \
             -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=memory"
 
